@@ -5,7 +5,10 @@
 
 use crate::config::{AppConfig, DisplayWallpaperConfig};
 use crate::media::MediaController;
-use crate::platform::{DisplayInfo, PlatformAdapter, PlatformError, PowerStatus};
+use crate::platform::{
+    DisplayInfo, PlatformAdapter, PlatformError, PowerStatus, ProcessResourceMetrics,
+    VideoPlaybackTelemetry,
+};
 use crate::PlatformEvent;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -65,10 +68,16 @@ impl WallpaperEngine {
         self.host_windows.get(display_id).copied()
     }
 
-    /// Re-enumerate connected displays, cleaning up removed displays and initializing added ones.
+    /// Re-enumerate connected displays, cleaning up removed displays, resizing changed displays,
+    /// and initializing newly added displays.
     pub fn refresh_displays(&mut self) -> Result<&[DisplayInfo], PlatformError> {
         let detected = self.adapter.enumerate_displays()?;
         let active_ids: HashSet<String> = detected.iter().map(|d| d.id.clone()).collect();
+        let previous_map: HashMap<String, DisplayInfo> = self
+            .displays
+            .iter()
+            .map(|d| (d.id.clone(), d.clone()))
+            .collect();
 
         // Clean up host windows and controllers for disconnected displays
         let removed_ids: Vec<String> = self
@@ -88,9 +97,22 @@ impl WallpaperEngine {
             self.user_paused.remove(&id);
         }
 
-        // Initialize controllers for newly connected displays
+        // Initialize controllers for newly connected displays and resize existing host windows
+        // if a monitor's resolution or virtual desktop coordinates changed.
         for display in &detected {
             self.controllers.entry(display.id.clone()).or_default();
+            if let (Some(&hwnd), Some(prev)) = (
+                self.host_windows.get(&display.id),
+                previous_map.get(&display.id),
+            ) {
+                if prev.left != display.left
+                    || prev.top != display.top
+                    || prev.width != display.width
+                    || prev.height != display.height
+                {
+                    let _ = self.adapter.resize_wallpaper_host_window(hwnd, display);
+                }
+            }
         }
 
         self.displays = detected;
@@ -362,6 +384,30 @@ impl WallpaperEngine {
         match event {
             PlatformEvent::DisplayConfigurationChanged => {
                 self.refresh_displays()?;
+                // Restore wallpapers for any newly connected displays that do not yet have a host window
+                let missing_displays: Vec<(String, bool)> = self
+                    .displays
+                    .iter()
+                    .filter(|d| !self.host_windows.contains_key(&d.id))
+                    .map(|d| (d.id.clone(), d.is_primary))
+                    .collect();
+                for (id, is_primary) in missing_displays {
+                    let saved_cfg = self.config.per_display.get(&id).cloned().or_else(|| {
+                        if is_primary {
+                            self.config.default_wallpaper.clone()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(cfg) = saved_cfg {
+                        if let Some(ctrl) = self.controllers.get_mut(&id) {
+                            ctrl.set_muted(cfg.muted);
+                            ctrl.set_volume(cfg.volume);
+                            ctrl.set_loop(cfg.loop_playback);
+                        }
+                        let _ = self.apply_wallpaper(&id, cfg.media_path);
+                    }
+                }
                 self.evaluate_policy()?;
             }
             PlatformEvent::SystemSleepEntered => {
@@ -389,6 +435,32 @@ impl WallpaperEngine {
     /// Query current power status from the underlying platform adapter.
     pub fn query_power_status(&self) -> Result<PowerStatus, PlatformError> {
         self.adapter.query_power_status()
+    }
+
+    /// Query live hardware video playback telemetry (resolution, position, duration) for a display.
+    #[must_use]
+    pub fn video_telemetry(&self, display_id: &str) -> Option<VideoPlaybackTelemetry> {
+        let hwnd = self.host_windows.get(display_id).copied()?;
+        self.adapter.query_video_telemetry(hwnd)
+    }
+
+    /// Query measured physical RAM working set and CPU time of the current Auralis process.
+    #[must_use]
+    pub fn process_metrics(&self) -> Option<ProcessResourceMetrics> {
+        self.adapter.query_process_metrics()
+    }
+
+    /// Configure OS login startup registration and synchronize `self.config.launch_at_startup`.
+    pub fn set_launch_at_startup(&mut self, enabled: bool) -> Result<(), PlatformError> {
+        self.adapter.set_launch_at_startup(enabled)?;
+        self.config.launch_at_startup = enabled;
+        Ok(())
+    }
+
+    /// Query whether OS login startup registration is currently active.
+    #[must_use]
+    pub fn is_launch_at_startup_enabled(&self) -> bool {
+        self.adapter.is_launch_at_startup_enabled()
     }
 
     /// Return true if at least one display has an active wallpaper host window.

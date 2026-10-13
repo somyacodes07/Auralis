@@ -1,11 +1,12 @@
-//! Native Windows Configuration UI & Event Loop (`windows_gui.rs`)
+//! Native Windows Configuration UI, In-App Video Preview, System Tray & Event Loop (`windows_gui.rs`)
 //!
 //! Provides a lightweight, DPI-aware, flicker-free Win32 Configuration Studio window
-//! and message loop for selecting local videos, controlling playback/audio/looping,
-//! configuring power and full-screen policies, and running the wallpaper engine behind
-//! desktop icons.
+//! with an embedded hardware-decoded video preview panel, drag-and-drop file support,
+//! a persistent Windows system tray icon (`Shell_NotifyIconW`) with right-click context menu,
+//! Windows login startup registration, and real-time hardware/process telemetry.
 
 use super::windows::{string_from_wide, wide_string, WindowsPlatformAdapter};
+use super::windows_player::MfVideoPlayer;
 use crate::config::AppConfig;
 use crate::engine::WallpaperEngine;
 use crate::media::PlaybackState;
@@ -14,31 +15,42 @@ use crate::{PlatformEvent, VERSION};
 use std::cell::RefCell;
 use std::mem;
 use std::path::PathBuf;
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateFontW, DeleteObject, GetDC, GetDeviceCaps, GetStockObject, ReleaseDC, CLEARTYPE_QUALITY,
-    CLIP_DEFAULT_PRECIS, COLOR_WINDOW, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DEFAULT_PITCH, FF_SWISS,
-    FW_NORMAL, HBRUSH, HFONT, LOGPIXELSY, OUT_TT_PRECIS,
+    CreateFontW, DeleteObject, GetDC, GetDeviceCaps, GetStockObject, ReleaseDC, BLACK_BRUSH,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, DEFAULT_CHARSET, DEFAULT_GUI_FONT,
+    DEFAULT_PITCH, FF_SWISS, FW_NORMAL, HBRUSH, HFONT, LOGPIXELSY, OUT_TT_PRECIS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
+use windows_sys::Win32::UI::Shell::{
+    DragAcceptFiles, DragFinish, DragQueryFileW, Shell_NotifyIconW, HDROP, NIF_ICON, NIF_MESSAGE,
+    NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW, GetMessageW,
-    GetWindowTextLengthW, GetWindowTextW, KillTimer, PostQuitMessage, RegisterClassW, SendMessageW,
-    SetForegroundWindow, SetTimer, SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK,
-    BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL,
-    CB_RESETCONTENT, CB_SETCURSEL, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, MSG,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, GetWindowTextLengthW, GetWindowTextW,
+    KillTimer, LoadCursorW, LoadIconW, PostQuitMessage, RegisterClassW, SendMessageW,
+    SetForegroundWindow, SetTimer, SetWindowTextW, ShowWindow, TrackPopupMenu, TranslateMessage,
+    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST,
+    CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, CS_HREDRAW, CS_VREDRAW,
+    CW_USEDEFAULT, ES_AUTOHSCROLL, IDC_ARROW, IDI_APPLICATION, MF_SEPARATOR, MF_STRING, MSG,
     PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
-    SW_HIDE, SW_RESTORE, SW_SHOW, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_POWERBROADCAST, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION,
-    WS_CHILD, WS_CLIPCHILDREN, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    SW_HIDE, SW_RESTORE, SW_SHOW, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, WM_APP, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DROPFILES, WM_LBUTTONDBLCLK,
+    WM_LBUTTONUP, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_BORDER,
+    WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_MINIMIZEBOX, WS_OVERLAPPED,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 pub const WINDOW_CLASS_NAME: &str = "AuralisConfigStudioWindowClass";
+const PREVIEW_CLASS_NAME: &str = "AuralisPreviewSurfaceWindowClass";
+
 const WM_AURALIS_SHOW_UI: u32 = WM_APP + 1;
 const WM_AURALIS_RELOAD_CONFIG: u32 = WM_APP + 2;
+const WM_AURALIS_TRAY_ICON: u32 = WM_APP + 3;
 
 /// `SS_NOPREFIX` prevents `STATIC` controls from interpreting `&` as an underline accelerator.
 const SS_NOPREFIX: u32 = 0x0080;
@@ -57,6 +69,16 @@ const ID_CHK_FULLSCREEN: usize = 110;
 const ID_CHK_BATTERY: usize = 111;
 const ID_BTN_HIDE: usize = 112;
 const ID_BTN_QUIT: usize = 113;
+const ID_CHK_STARTUP: usize = 114;
+const ID_BTN_PREVIEW: usize = 115;
+const ID_BTN_STOP_PREVIEW: usize = 116;
+
+const TRAY_ICON_ID: u32 = 1;
+const IDM_TRAY_OPEN: usize = 2001;
+const IDM_TRAY_PAUSE_RESUME: usize = 2002;
+const IDM_TRAY_MUTE_UNMUTE: usize = 2003;
+const IDM_TRAY_STOP: usize = 2004;
+const IDM_TRAY_QUIT: usize = 2005;
 
 const ID_TIMER_TICK: usize = 1;
 /// 100ms tick interval ensures pre-EOS seamless loop seeking and responsive policy updates.
@@ -76,9 +98,14 @@ struct GuiState {
     lbl_volume: HWND,
     chk_fullscreen: HWND,
     chk_battery: HWND,
+    chk_startup: HWND,
+    hwnd_preview: HWND,
+    preview_player: Option<MfVideoPlayer>,
+    preview_path: Option<PathBuf>,
     lbl_status: HWND,
     last_error: Option<String>,
     last_status_text: String,
+    tray_added: bool,
 }
 
 thread_local! {
@@ -122,9 +149,34 @@ fn scale_px(px: i32, scale: f32) -> i32 {
     ((px as f32) * scale).round() as i32
 }
 
+/// Register the black-background child window class used for the in-app video preview canvas.
+fn register_preview_surface_class(hinstance: *mut std::ffi::c_void) {
+    let class_wide = wide_string(PREVIEW_CLASS_NAME);
+    // SAFETY: GetStockObject(BLACK_BRUSH) returns the system stock black brush handle.
+    let black_brush = unsafe { GetStockObject(BLACK_BRUSH) };
+    let wnd_class = WNDCLASSW {
+        style: 0,
+        lpfnWndProc: Some(DefWindowProcW),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: hinstance,
+        hIcon: std::ptr::null_mut(),
+        hCursor: std::ptr::null_mut(),
+        hbrBackground: black_brush as HBRUSH,
+        lpszMenuName: std::ptr::null(),
+        lpszClassName: class_wide.as_ptr(),
+    };
+    // SAFETY: RegisterClassW registers the preview surface window class for this process.
+    unsafe { RegisterClassW(&wnd_class) };
+}
+
 /// Launch the native Windows Configuration UI and enter the Win32 message & playback loop.
-pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
+pub fn run_windows_gui(
+    initial_video: Option<PathBuf>,
+    start_minimized: bool,
+) -> Result<(), String> {
     WindowsPlatformAdapter::ensure_dpi_awareness();
+    WindowsPlatformAdapter::register_wallpaper_host_class();
 
     // If an Auralis Studio instance is already running in the background, bring its UI to front
     let class_wide = wide_string(WINDOW_CLASS_NAME);
@@ -141,11 +193,14 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
     }
 
     let config_path = AppConfig::default_config_path();
-    let (config, load_warning) = AppConfig::load_or_recover(&config_path);
+    let (mut config, load_warning) = AppConfig::load_or_recover(&config_path);
     if let Some(warn) = &load_warning {
         eprintln!("Warning: {warn}");
     }
     let adapter = create_platform_adapter();
+    let startup_actual = adapter.is_launch_at_startup_enabled();
+    config.launch_at_startup = startup_actual;
+
     let mut engine = WallpaperEngine::new(config, adapter).map_err(|e| e.to_string())?;
 
     // Restore any previously saved wallpaper configuration or apply initial CLI video
@@ -199,14 +254,28 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
             lbl_volume: std::ptr::null_mut(),
             chk_fullscreen: std::ptr::null_mut(),
             chk_battery: std::ptr::null_mut(),
+            chk_startup: std::ptr::null_mut(),
+            hwnd_preview: std::ptr::null_mut(),
+            preview_player: None,
+            preview_path: None,
             lbl_status: std::ptr::null_mut(),
             last_error: load_warning,
             last_status_text: String::new(),
+            tray_added: false,
         });
     });
 
     // SAFETY: GetModuleHandleW(null) retrieves the current process module handle.
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
+    register_preview_surface_class(hinstance);
+
+    // SAFETY: LoadIconW and LoadCursorW load standard system application icon and arrow cursor.
+    let (hicon, hcursor) = unsafe {
+        (
+            LoadIconW(std::ptr::null_mut(), IDI_APPLICATION),
+            LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
+        )
+    };
 
     let wnd_class = WNDCLASSW {
         style: CS_HREDRAW | CS_VREDRAW,
@@ -214,8 +283,8 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
         cbClsExtra: 0,
         cbWndExtra: 0,
         hInstance: hinstance,
-        hIcon: std::ptr::null_mut(),
-        hCursor: std::ptr::null_mut(),
+        hIcon: hicon,
+        hCursor: hcursor,
         hbrBackground: (COLOR_WINDOW + 1) as HBRUSH,
         lpszMenuName: std::ptr::null(),
         lpszClassName: class_wide.as_ptr(),
@@ -225,9 +294,11 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
     unsafe { RegisterClassW(&wnd_class) };
 
     let title = wide_string(&format!("Auralis Live Wallpaper Studio v{VERSION}"));
-    // WS_CLIPCHILDREN prevents the parent window from erasing over child buttons/labels on repaint.
-    let style =
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN | WS_VISIBLE;
+    // WS_CLIPCHILDREN prevents the parent window from erasing over child buttons/labels/preview on repaint.
+    let mut style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    if !start_minimized {
+        style |= WS_VISIBLE;
+    }
 
     // SAFETY: CreateWindowExW creates the main configuration window and triggers WM_CREATE.
     let hwnd = unsafe {
@@ -238,8 +309,8 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            scale_px(640, scale),
-            scale_px(485, scale),
+            scale_px(920, scale),
+            scale_px(535, scale),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             hinstance,
@@ -263,6 +334,9 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
     // Clean shutdown when the message loop exits
     GUI_STATE.with(|cell| {
         if let Some(mut state) = cell.borrow_mut().take() {
+            if let Some(mut preview) = state.preview_player.take() {
+                preview.shutdown();
+            }
             let _ = state.engine.config.save_to_file(&state.config_path);
             state.engine.shutdown();
             if !state.ui_font.is_null() {
@@ -277,6 +351,138 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
+/// Register the Auralis system tray icon (`Shell_NotifyIconW`) for background operation.
+fn add_tray_icon(hwnd: HWND) {
+    // SAFETY: NOTIFYICONDATAW is a plain C struct safe to zero-initialize.
+    let mut nid: NOTIFYICONDATAW = unsafe { mem::zeroed() };
+    nid.cbSize = mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = TRAY_ICON_ID;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nid.uCallbackMessage = WM_AURALIS_TRAY_ICON;
+    // SAFETY: LoadIconW retrieves the standard system application icon.
+    nid.hIcon = unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) };
+
+    let tip = wide_string(&format!(
+        "Auralis Live Wallpaper Studio v{VERSION} (Right-click for controls)"
+    ));
+    let copy_len = tip.len().min(nid.szTip.len() - 1);
+    nid.szTip[..copy_len].copy_from_slice(&tip[..copy_len]);
+
+    // SAFETY: Shell_NotifyIconW(NIM_ADD) registers the tray icon for `hwnd`.
+    let added = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) } != 0;
+    GUI_STATE.with(|cell| {
+        if let Some(state) = cell.borrow_mut().as_mut() {
+            state.tray_added = added;
+        }
+    });
+}
+
+/// Remove the Auralis system tray icon on exit.
+fn remove_tray_icon(hwnd: HWND) {
+    // SAFETY: NOTIFYICONDATAW is a plain C struct safe to zero-initialize.
+    let mut nid: NOTIFYICONDATAW = unsafe { mem::zeroed() };
+    nid.cbSize = mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = TRAY_ICON_ID;
+    // SAFETY: Shell_NotifyIconW(NIM_DELETE) removes the tray icon registered for `hwnd`.
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+    }
+}
+
+/// Display the right-click context menu for the system tray icon.
+fn show_tray_context_menu(hwnd: HWND) {
+    // SAFETY: CreatePopupMenu allocates a native Win32 popup menu handle.
+    let hmenu = unsafe { CreatePopupMenu() };
+    if hmenu.is_null() {
+        return;
+    }
+
+    let lbl_open = wide_string("Open Auralis Studio");
+    let lbl_pause = wide_string("Pause / Resume Wallpaper");
+    let lbl_mute = wide_string("Mute / Unmute Audio");
+    let lbl_stop = wide_string("Stop Wallpaper");
+    let lbl_quit = wide_string("Quit Auralis && Restore Desktop");
+
+    // SAFETY: AppendMenuW populates the valid popup menu with command items and separators.
+    unsafe {
+        AppendMenuW(hmenu, MF_STRING, IDM_TRAY_OPEN, lbl_open.as_ptr());
+        AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
+        AppendMenuW(hmenu, MF_STRING, IDM_TRAY_PAUSE_RESUME, lbl_pause.as_ptr());
+        AppendMenuW(hmenu, MF_STRING, IDM_TRAY_MUTE_UNMUTE, lbl_mute.as_ptr());
+        AppendMenuW(hmenu, MF_STRING, IDM_TRAY_STOP, lbl_stop.as_ptr());
+        AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
+        AppendMenuW(hmenu, MF_STRING, IDM_TRAY_QUIT, lbl_quit.as_ptr());
+    }
+
+    // SAFETY: POINT is a plain C struct safe to zero-initialize.
+    let mut pt: POINT = unsafe { mem::zeroed() };
+    // SAFETY: GetCursorPos retrieves current screen coordinates; TrackPopupMenu displays the modal menu.
+    let cmd = unsafe {
+        GetCursorPos(&mut pt);
+        SetForegroundWindow(hwnd);
+        TrackPopupMenu(
+            hmenu,
+            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
+            pt.x,
+            pt.y,
+            0,
+            hwnd,
+            std::ptr::null(),
+        )
+    };
+    // SAFETY: DestroyMenu frees the popup menu handle after TrackPopupMenu returns.
+    unsafe {
+        DestroyMenu(hmenu);
+    }
+
+    match cmd as usize {
+        IDM_TRAY_OPEN => {
+            // SAFETY: Restores and focuses the main Studio window.
+            unsafe {
+                ShowWindow(hwnd, SW_SHOW);
+                ShowWindow(hwnd, SW_RESTORE);
+                SetForegroundWindow(hwnd);
+            }
+            update_status_readout();
+        }
+        IDM_TRAY_PAUSE_RESUME => {
+            handle_command(hwnd, ID_BTN_PAUSE_RESUME, 0);
+        }
+        IDM_TRAY_MUTE_UNMUTE => {
+            GUI_STATE.with(|cell| {
+                if let Some(state) = cell.borrow_mut().as_mut() {
+                    let display_id = selected_display_id(state);
+                    let (cur_muted, cur_vol) = state
+                        .engine
+                        .controller(&display_id)
+                        .map_or((true, 50), |c| (c.muted, c.volume));
+                    let new_muted = !cur_muted;
+                    let new_vol = if !new_muted && cur_vol == 0 {
+                        50
+                    } else {
+                        cur_vol
+                    };
+                    let _ = state
+                        .engine
+                        .set_display_audio(&display_id, new_muted, new_vol);
+                    let _ = state.engine.config.save_to_file(&state.config_path);
+                }
+            });
+            sync_controls_from_state();
+            update_status_readout();
+        }
+        IDM_TRAY_STOP => {
+            handle_command(hwnd, ID_BTN_STOP, 0);
+        }
+        IDM_TRAY_QUIT => {
+            handle_command(hwnd, ID_BTN_QUIT, 0);
+        }
+        _ => {}
+    }
+}
+
 // SAFETY: Standard Win32 window procedure callback invoked on the GUI STA thread.
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
@@ -287,6 +493,9 @@ unsafe extern "system" fn window_proc(
     match msg {
         WM_CREATE => {
             create_child_controls(hwnd);
+            add_tray_icon(hwnd);
+            // SAFETY: DragAcceptFiles enables drag-and-drop of video files onto `hwnd`.
+            unsafe { DragAcceptFiles(hwnd, 1) };
             sync_controls_from_state();
             update_status_readout();
             // SAFETY: SetTimer schedules periodic engine policy & seamless loop ticks on hwnd.
@@ -297,6 +506,7 @@ unsafe extern "system" fn window_proc(
             // SAFETY: Shows and brings the existing main configuration window to the foreground.
             unsafe {
                 ShowWindow(hwnd, SW_SHOW);
+                ShowWindow(hwnd, SW_RESTORE);
                 SetForegroundWindow(hwnd);
             }
             update_status_readout();
@@ -313,6 +523,52 @@ unsafe extern "system" fn window_proc(
             });
             sync_controls_from_state();
             update_status_readout();
+            0
+        }
+        WM_AURALIS_TRAY_ICON => {
+            let mouse_msg = (lparam as u32) & 0xFFFF;
+            match mouse_msg {
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
+                    // SAFETY: Restores and focuses the main Studio window when clicking the tray icon.
+                    unsafe {
+                        ShowWindow(hwnd, SW_SHOW);
+                        ShowWindow(hwnd, SW_RESTORE);
+                        SetForegroundWindow(hwnd);
+                    }
+                    update_status_readout();
+                }
+                WM_RBUTTONUP => {
+                    show_tray_context_menu(hwnd);
+                }
+                _ => {}
+            }
+            0
+        }
+        WM_DROPFILES => {
+            let hdrop = wparam as HDROP;
+            if !hdrop.is_null() {
+                let mut file_buf = vec![0u16; 1024];
+                // SAFETY: DragQueryFileW retrieves the first dropped file path into file_buf, and DragFinish releases hdrop.
+                let copied = unsafe {
+                    let c = DragQueryFileW(hdrop, 0, file_buf.as_mut_ptr(), file_buf.len() as u32);
+                    DragFinish(hdrop);
+                    c
+                };
+                if copied > 0 {
+                    let path_str = string_from_wide(&file_buf);
+                    if !path_str.is_empty() {
+                        GUI_STATE.with(|cell| {
+                            if let Some(state) = cell.borrow().as_ref() {
+                                let wide = wide_string(&path_str);
+                                // SAFETY: Populates the EDIT control with the dropped file path.
+                                unsafe { SetWindowTextW(state.edt_path, wide.as_ptr()) };
+                            }
+                        });
+                        start_in_app_preview(PathBuf::from(path_str));
+                        update_status_readout();
+                    }
+                }
+            }
             0
         }
         WM_DISPLAYCHANGE => {
@@ -353,6 +609,9 @@ unsafe extern "system" fn window_proc(
                 GUI_STATE.with(|cell| {
                     if let Some(state) = cell.borrow_mut().as_mut() {
                         let _ = state.engine.tick();
+                        if let Some(preview) = &mut state.preview_player {
+                            let _ = preview.tick(true);
+                        }
                     }
                 });
                 update_status_readout();
@@ -361,21 +620,28 @@ unsafe extern "system" fn window_proc(
         }
         WM_COMMAND => {
             let control_id = wparam & 0xFFFF;
-            handle_command(hwnd, control_id);
+            let notify_code = (wparam >> 16) & 0xFFFF;
+            handle_command(hwnd, control_id, notify_code);
             0
         }
         WM_CLOSE => {
             // AGENTS.md Principle 9: Closing the configuration window must not unexpectedly
-            // stop an active wallpaper. If a wallpaper is playing, hide the window to background;
-            // otherwise close and exit cleanly.
+            // stop an active wallpaper. If a wallpaper is playing, stop the in-app preview to save
+            // resources and hide the window to the system tray; otherwise close and exit cleanly.
             let has_active = GUI_STATE.with(|cell| {
-                cell.borrow()
-                    .as_ref()
-                    .is_some_and(|s| s.engine.has_active_wallpaper())
+                if let Some(state) = cell.borrow_mut().as_mut() {
+                    if let Some(mut preview) = state.preview_player.take() {
+                        preview.shutdown();
+                    }
+                    state.preview_path = None;
+                    state.engine.has_active_wallpaper()
+                } else {
+                    false
+                }
             });
 
             if has_active {
-                // SAFETY: Hides hwnd while keeping the Win32 message loop and wallpaper running.
+                // SAFETY: Hides hwnd while keeping the Win32 message loop, tray icon, and wallpaper running.
                 unsafe { ShowWindow(hwnd, SW_HIDE) };
             } else {
                 // SAFETY: Destroys hwnd and triggers WM_DESTROY to exit the application.
@@ -384,6 +650,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
+            remove_tray_icon(hwnd);
             // SAFETY: Stops the periodic timer and posts WM_QUIT to exit the message loop.
             unsafe {
                 KillTimer(hwnd, ID_TIMER_TICK);
@@ -461,23 +728,23 @@ fn create_child_controls(parent: HWND) {
 
     mk_ctrl(
         "STATIC",
-        "Auralis Live Wallpaper Studio — Native Hardware-Decoded Video Engine",
+        "Auralis Live Wallpaper Studio — Native Hardware-Decoded Video Engine (Drag && Drop Video Supported)",
         SS_NOPREFIX,
         20,
-        16,
-        580,
+        14,
+        860,
         24,
         0,
     );
 
-    mk_ctrl("STATIC", "Target Monitor:", SS_NOPREFIX, 20, 52, 115, 24, 0);
+    mk_ctrl("STATIC", "Target Monitor:", SS_NOPREFIX, 20, 48, 115, 24, 0);
     let cmb_display = mk_ctrl(
         "COMBOBOX",
         "",
         CBS_DROPDOWNLIST as u32 | WS_TABSTOP,
         140,
-        48,
-        460,
+        44,
+        440,
         220,
         ID_CMB_DISPLAY,
     );
@@ -487,7 +754,7 @@ fn create_child_controls(parent: HWND) {
         "Video File Path:",
         SS_NOPREFIX,
         20,
-        90,
+        84,
         115,
         24,
         0,
@@ -497,8 +764,8 @@ fn create_child_controls(parent: HWND) {
         "",
         WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
         140,
-        86,
-        335,
+        80,
+        320,
         28,
         ID_EDT_PATH,
     );
@@ -506,9 +773,9 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Browse Video...",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        485,
-        85,
-        115,
+        470,
+        79,
+        110,
         30,
         ID_BTN_BROWSE,
     );
@@ -519,8 +786,8 @@ fn create_child_controls(parent: HWND) {
         "Apply && Play Wallpaper",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         20,
-        130,
-        205,
+        122,
+        195,
         36,
         ID_BTN_APPLY,
     );
@@ -528,8 +795,8 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Pause / Resume",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        240,
-        130,
+        225,
+        122,
         170,
         36,
         ID_BTN_PAUSE_RESUME,
@@ -538,8 +805,8 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Stop && Clear",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        425,
-        130,
+        405,
+        122,
         175,
         36,
         ID_BTN_STOP,
@@ -550,8 +817,8 @@ fn create_child_controls(parent: HWND) {
         "Mute Audio",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         20,
-        180,
-        130,
+        172,
+        125,
         26,
         ID_CHK_MUTE,
     );
@@ -559,9 +826,9 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Seamless Loop",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
-        165,
-        180,
-        145,
+        155,
+        172,
+        140,
         26,
         ID_CHK_LOOP,
     );
@@ -569,19 +836,19 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Vol -",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        330,
-        178,
+        310,
+        170,
         65,
         28,
         ID_BTN_VOL_DOWN,
     );
-    let lbl_volume = mk_ctrl("STATIC", "Volume: 0%", SS_NOPREFIX, 405, 183, 115, 24, 0);
+    let lbl_volume = mk_ctrl("STATIC", "Volume: 0%", SS_NOPREFIX, 385, 175, 115, 24, 0);
     mk_ctrl(
         "BUTTON",
         "Vol +",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        535,
-        178,
+        515,
+        170,
         65,
         28,
         ID_BTN_VOL_UP,
@@ -592,9 +859,9 @@ fn create_child_controls(parent: HWND) {
         "Pause wallpaper when a Full-Screen App or Game is active",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         20,
-        216,
+        206,
         560,
-        26,
+        24,
         ID_CHK_FULLSCREEN,
     );
     let chk_battery = mk_ctrl(
@@ -602,10 +869,62 @@ fn create_child_controls(parent: HWND) {
         "Pause wallpaper on Battery Power / Battery Saver",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         20,
-        246,
+        234,
         560,
-        26,
+        24,
         ID_CHK_BATTERY,
+    );
+    let chk_startup = mk_ctrl(
+        "BUTTON",
+        "Launch Auralis in System Tray when Windows starts (HKCU\\...\\Run)",
+        BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+        20,
+        262,
+        560,
+        24,
+        ID_CHK_STARTUP,
+    );
+
+    // Right column: In-App Video Preview Panel (AGENTS.md Section 1)
+    mk_ctrl(
+        "STATIC",
+        "In-App Video Preview (16:9):",
+        SS_NOPREFIX,
+        600,
+        48,
+        280,
+        22,
+        0,
+    );
+    let hwnd_preview = mk_ctrl(
+        PREVIEW_CLASS_NAME,
+        "",
+        WS_BORDER | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        600,
+        74,
+        280,
+        158,
+        0,
+    );
+    mk_ctrl(
+        "BUTTON",
+        "Preview in App",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        600,
+        240,
+        135,
+        32,
+        ID_BTN_PREVIEW,
+    );
+    mk_ctrl(
+        "BUTTON",
+        "Stop Preview",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        745,
+        240,
+        135,
+        32,
+        ID_BTN_STOP_PREVIEW,
     );
 
     let lbl_status = mk_ctrl(
@@ -613,19 +932,19 @@ fn create_child_controls(parent: HWND) {
         "Initializing engine telemetry...",
         WS_BORDER | SS_NOPREFIX,
         20,
-        284,
-        580,
-        92,
+        298,
+        860,
+        118,
         0,
     );
 
     mk_ctrl(
         "BUTTON",
-        "Hide Window (Keep Wallpaper Playing)",
+        "Minimize to System Tray (Keep Playing)",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         20,
-        390,
-        280,
+        430,
+        415,
         36,
         ID_BTN_HIDE,
     );
@@ -633,9 +952,9 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Quit Auralis && Restore Desktop",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        320,
-        390,
-        280,
+        465,
+        430,
+        415,
         36,
         ID_BTN_QUIT,
     );
@@ -649,8 +968,43 @@ fn create_child_controls(parent: HWND) {
             state.lbl_volume = lbl_volume;
             state.chk_fullscreen = chk_fullscreen;
             state.chk_battery = chk_battery;
+            state.chk_startup = chk_startup;
+            state.hwnd_preview = hwnd_preview;
             state.lbl_status = lbl_status;
             repopulate_display_combo(state);
+        }
+    });
+}
+
+fn start_in_app_preview(path: PathBuf) {
+    GUI_STATE.with(|cell| {
+        if let Some(state) = cell.borrow_mut().as_mut() {
+            if state.hwnd_preview.is_null() {
+                return;
+            }
+            match MfVideoPlayer::create_and_play(state.hwnd_preview as isize, &path, true, 0) {
+                Ok(new_preview) => {
+                    if let Some(mut old) = state.preview_player.replace(new_preview) {
+                        old.shutdown();
+                    }
+                    state.preview_path = Some(path);
+                    state.last_error = None;
+                }
+                Err(e) => {
+                    state.last_error = Some(format!("In-app preview failed: {e}"));
+                }
+            }
+        }
+    });
+}
+
+fn stop_in_app_preview() {
+    GUI_STATE.with(|cell| {
+        if let Some(state) = cell.borrow_mut().as_mut() {
+            if let Some(mut preview) = state.preview_player.take() {
+                preview.shutdown();
+            }
+            state.preview_path = None;
         }
     });
 }
@@ -728,6 +1082,16 @@ fn sync_controls_from_state() {
                     },
                     0,
                 );
+                SendMessageW(
+                    state.chk_startup,
+                    BM_SETCHECK,
+                    if state.engine.config.launch_at_startup {
+                        BST_CHECKED
+                    } else {
+                        BST_UNCHECKED
+                    },
+                    0,
+                );
 
                 let vol_txt = wide_string(&format!("Volume: {volume}%"));
                 SetWindowTextW(state.lbl_volume, vol_txt.as_ptr());
@@ -779,8 +1143,14 @@ fn browse_video_file(owner: HWND) -> Option<PathBuf> {
     None
 }
 
-fn handle_command(hwnd: HWND, control_id: usize) {
+fn handle_command(hwnd: HWND, control_id: usize, notify_code: usize) {
     match control_id {
+        ID_CMB_DISPLAY => {
+            if notify_code == CBN_SELCHANGE as usize {
+                sync_controls_from_state();
+                update_status_readout();
+            }
+        }
         ID_BTN_BROWSE => {
             if let Some(chosen) = browse_video_file(hwnd) {
                 GUI_STATE.with(|cell| {
@@ -790,7 +1160,36 @@ fn handle_command(hwnd: HWND, control_id: usize) {
                         unsafe { SetWindowTextW(state.edt_path, wide.as_ptr()) };
                     }
                 });
+                start_in_app_preview(chosen);
+                update_status_readout();
             }
+        }
+        ID_BTN_PREVIEW => {
+            let path_opt = GUI_STATE.with(|cell| {
+                cell.borrow().as_ref().and_then(|state| {
+                    let txt = read_edit_text(state.edt_path);
+                    if txt.trim().is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(txt.trim()))
+                    }
+                })
+            });
+            if let Some(p) = path_opt {
+                start_in_app_preview(p);
+            } else {
+                GUI_STATE.with(|cell| {
+                    if let Some(state) = cell.borrow_mut().as_mut() {
+                        state.last_error =
+                            Some("Select or enter a video file path to preview.".to_string());
+                    }
+                });
+            }
+            update_status_readout();
+        }
+        ID_BTN_STOP_PREVIEW => {
+            stop_in_app_preview();
+            update_status_readout();
         }
         ID_BTN_APPLY => {
             GUI_STATE.with(|cell| {
@@ -915,16 +1314,46 @@ fn handle_command(hwnd: HWND, control_id: usize) {
             });
             update_status_readout();
         }
+        ID_CHK_STARTUP => {
+            GUI_STATE.with(|cell| {
+                if let Some(state) = cell.borrow_mut().as_mut() {
+                    // SAFETY: Queries the current check state of the Windows login startup checkbox.
+                    let startup_checked =
+                        unsafe { SendMessageW(state.chk_startup, BM_GETCHECK, 0, 0) }
+                            == BST_CHECKED as isize;
+                    match state.engine.set_launch_at_startup(startup_checked) {
+                        Ok(()) => {
+                            state.last_error = None;
+                            let _ = state.engine.config.save_to_file(&state.config_path);
+                        }
+                        Err(e) => {
+                            state.last_error = Some(format!("Startup registration failed: {e}"));
+                        }
+                    }
+                }
+            });
+            sync_controls_from_state();
+            update_status_readout();
+        }
         ID_BTN_HIDE => {
-            // SAFETY: Hides the main configuration window while keeping playback active.
+            stop_in_app_preview();
+            // SAFETY: Hides the main configuration window to the system tray while keeping playback active.
             unsafe { ShowWindow(hwnd, SW_HIDE) };
         }
         ID_BTN_QUIT => {
+            stop_in_app_preview();
             // SAFETY: Destroys the main configuration window to trigger clean shutdown.
             unsafe { DestroyWindow(hwnd) };
         }
         _ => {}
     }
+}
+
+fn format_mm_ss(ms: u64) -> String {
+    let total_secs = ms / 1000;
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+    format!("{mins:02}:{secs:02}")
 }
 
 fn update_status_readout() {
@@ -943,7 +1372,8 @@ fn update_status_readout() {
                     format!("LOADING ({})", path.display())
                 }
                 Some(PlaybackState::Failed { error, .. }) => format!("FAILED: {error}"),
-                _ => "IDLE (Select a video file and click 'Apply & Play Wallpaper')".to_string(),
+                _ => "IDLE (Select or drop a video file and click 'Apply & Play Wallpaper')"
+                    .to_string(),
             };
 
             let hwnd_desc = state
@@ -951,8 +1381,23 @@ fn update_status_readout() {
                 .host_window(&display_id)
                 .map_or_else(|| "Detached".to_string(), |h| format!("WorkerW HWND 0x{h:X}"));
 
+            let video_meta = if let Some(tel) = state.engine.video_telemetry(&display_id) {
+                let res_str = tel
+                    .native_resolution
+                    .map_or_else(|| "Auto".to_string(), |(w, h)| format!("{w}x{h}"));
+                let time_str = match (tel.position_ms, tel.duration_ms) {
+                    (Some(pos), Some(dur)) if dur > 0 => {
+                        format!("{} / {}", format_mm_ss(pos), format_mm_ss(dur))
+                    }
+                    _ => "Live".to_string(),
+                };
+                format!("Video: {res_str} ({time_str})")
+            } else {
+                "Video: Inactive".to_string()
+            };
+
             let power_desc = match state.engine.query_power_status() {
-                Ok(PowerStatus::OnAcPower) => "AC Mains Power".to_string(),
+                Ok(PowerStatus::OnAcPower) => "AC Mains".to_string(),
                 Ok(PowerStatus::OnBattery {
                     percent,
                     battery_saver,
@@ -963,13 +1408,37 @@ fn update_status_readout() {
                 _ => "Unknown".to_string(),
             };
 
+            let perf_desc = if let Some(metrics) = state.engine.process_metrics() {
+                let ram_mb = (metrics.working_set_bytes as f64) / (1024.0 * 1024.0);
+                let cpu_sec = (metrics.cpu_time_ms as f64) / 1000.0;
+                format!("RAM: {ram_mb:.1} MB | CPU Time: {cpu_sec:.2}s")
+            } else {
+                "RAM: N/A".to_string()
+            };
+
+            let preview_desc = if let Some(p) = &state.preview_path {
+                let fname = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "active".to_string());
+                format!("Previewing '{fname}'")
+            } else {
+                "Preview Idle".to_string()
+            };
+
+            let tray_hint = if state.tray_added {
+                "System Tray Icon Active (Right-click tray icon for quick controls)."
+            } else {
+                "Closing or hiding this window keeps your active wallpaper playing."
+            };
+
             let status_line = if let Some(err) = &state.last_error {
                 format!(
-                    "Status: {state_desc}\r\nLayering: {hwnd_desc} | Power: {power_desc}\r\nNotice: {err}"
+                    "Status: {state_desc}\r\nLayering: {hwnd_desc} | {video_meta} | {preview_desc}\r\nPower: {power_desc} | Measured Resource Usage: {perf_desc}\r\nNotice: {err}"
                 )
             } else {
                 format!(
-                    "Status: {state_desc}\r\nLayering: {hwnd_desc} | Power: {power_desc}\r\nTip: Closing or hiding this window keeps your active wallpaper playing."
+                    "Status: {state_desc}\r\nLayering: {hwnd_desc} | {video_meta} | {preview_desc}\r\nPower: {power_desc} | Measured Resource Usage: {perf_desc}\r\nTip: {tray_hint}"
                 )
             };
 

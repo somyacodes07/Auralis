@@ -15,9 +15,18 @@ fn main() -> ExitCode {
 
     match command {
         "gui" => {
-            let initial_video = args.get(1).map(PathBuf::from);
-            run_gui(initial_video)
+            let start_minimized = args
+                .iter()
+                .skip(1)
+                .any(|a| a == "--minimized" || a == "--background");
+            let initial_video = args
+                .iter()
+                .skip(1)
+                .find(|a| !a.starts_with('-'))
+                .map(PathBuf::from);
+            run_gui(initial_video, start_minimized)
         }
+        "--minimized" | "--background" => run_gui(None, true),
         "status" => run_status(),
         "validate" => {
             if let Some(path_str) = args.get(1) {
@@ -54,7 +63,7 @@ fn main() -> ExitCode {
             // If the user dragged-and-dropped a video file onto auralis.exe, open the GUI with that file
             let candidate_path = PathBuf::from(other);
             if candidate_path.exists() {
-                run_gui(Some(candidate_path))
+                run_gui(Some(candidate_path), false)
             } else {
                 eprintln!("Unknown command: '{other}'");
                 print_help();
@@ -67,8 +76,10 @@ fn main() -> ExitCode {
 fn print_help() {
     println!("Auralis Live Wallpaper Engine v{VERSION}");
     println!("\nUsage:");
-    println!("  auralis [gui] [file]                 Launch Auralis Configuration Studio UI");
-    println!("  auralis status                       Show system, display, and power status");
+    println!("  auralis [gui] [file] [--minimized]   Launch Auralis Configuration Studio UI");
+    println!(
+        "  auralis status                       Show system, display, power, and resource status"
+    );
     println!("  auralis validate <file>              Validate a video file for wallpaper playback");
     println!("  auralis apply <file> [display_id]    Configure wallpaper and reload active session if running");
     println!(
@@ -79,10 +90,10 @@ fn print_help() {
     );
 }
 
-fn run_gui(initial_video: Option<PathBuf>) -> ExitCode {
+fn run_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> ExitCode {
     #[cfg(target_os = "windows")]
     {
-        match auralis::platform::windows_gui::run_windows_gui(initial_video) {
+        match auralis::platform::windows_gui::run_windows_gui(initial_video, start_minimized) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("Error running Auralis Configuration Studio: {e}");
@@ -92,7 +103,7 @@ fn run_gui(initial_video: Option<PathBuf>) -> ExitCode {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = initial_video;
+        let _ = (initial_video, start_minimized);
         run_status()
     }
 }
@@ -139,6 +150,15 @@ fn run_status() -> ExitCode {
                 Err(e) => eprintln!("Warning: Power status query failed: {e}"),
             }
 
+            if let Some(metrics) = engine.process_metrics() {
+                let ram_mb = (metrics.working_set_bytes as f64) / (1024.0 * 1024.0);
+                let peak_mb = (metrics.peak_working_set_bytes as f64) / (1024.0 * 1024.0);
+                let cpu_sec = (metrics.cpu_time_ms as f64) / 1000.0;
+                println!(
+                    "Measured Process Metrics:  RAM {ram_mb:.2} MB (Peak {peak_mb:.2} MB), CPU {cpu_sec:.3}s"
+                );
+            }
+
             let displays = engine.displays();
             println!("\nDetected Displays ({}):", displays.len());
             for d in displays {
@@ -159,8 +179,9 @@ fn run_status() -> ExitCode {
                 engine.config.pause_on_battery
             );
             println!(
-                "  Launch at startup:       {}",
-                engine.config.launch_at_startup
+                "  Launch at startup:       {} (OS Registry Active: {})",
+                engine.config.launch_at_startup,
+                engine.is_launch_at_startup_enabled()
             );
 
             if let Some(default_wp) = &engine.config.default_wallpaper {

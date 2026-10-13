@@ -6,21 +6,30 @@
 //! full-screen application occlusion detection.
 
 use super::windows_player::MfVideoPlayer;
-use super::{DisplayInfo, PlatformAdapter, PlatformError, PowerStatus};
+use super::{
+    DisplayInfo, PlatformAdapter, PlatformError, PowerStatus, ProcessResourceMetrics,
+    VideoPlaybackTelemetry,
+};
 use std::collections::HashMap;
 use std::mem;
 use std::path::Path;
 use std::sync::Once;
-use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{BOOL, FILETIME, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, DEVMODEW, ENUM_CURRENT_SETTINGS,
     HDC, HMONITOR, MONITORINFOEXW,
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+use windows_sys::Win32::System::Registry::{
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
+};
 use windows_sys::Win32::System::StationsAndDesktops::{
     CloseDesktop, OpenDesktopW, SetThreadDesktop,
 };
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, FindWindowExW, FindWindowW,
     GetClassNameW, GetDesktopWindow, GetForegroundWindow, GetShellWindow, GetWindowLongPtrW,
@@ -39,6 +48,10 @@ const DESKTOP_ACCESS_ALL: u32 = 0x01FF;
 
 /// Custom window class name for our flicker-free wallpaper host window.
 const WALLPAPER_HOST_CLASS_NAME: &str = "AuralisWallpaperHostWindowClass";
+
+/// Registry subkey and value name for Windows login startup.
+const RUN_REGISTRY_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_REGISTRY_VALUE_NAME: &str = "Auralis";
 
 /// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2` constant (`(DPI_AWARENESS_CONTEXT)-4`).
 const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
@@ -129,7 +142,8 @@ impl WindowsPlatformAdapter {
     }
 
     /// Register the custom flicker-free window class for wallpaper host windows.
-    fn register_wallpaper_host_class() {
+    pub(crate) fn register_wallpaper_host_class() {
+        // SAFETY: Standard Win32 window procedure for flicker-free EVR host windows.
         unsafe extern "system" fn wallpaper_host_wnd_proc(
             hwnd: HWND,
             msg: u32,
@@ -221,6 +235,7 @@ impl WindowsPlatformAdapter {
             target_workerw: std::ptr::null_mut(),
         };
 
+        // SAFETY: Standard Win32 EnumWindows callback invoked synchronously on the calling thread.
         unsafe extern "system" fn enum_windows_proc(top_hwnd: HWND, lparam: LPARAM) -> BOOL {
             // SAFETY: lparam points to our stack-allocated EnumContext for the duration of EnumWindows.
             let ctx = unsafe { &mut *(lparam as *mut EnumContext) };
@@ -294,6 +309,7 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         Self::ensure_dpi_awareness();
         let mut displays = Vec::new();
 
+        // SAFETY: Standard Win32 EnumDisplayMonitors callback invoked synchronously on the calling thread.
         unsafe extern "system" fn monitor_enum_proc(
             hmonitor: HMONITOR,
             _hdc: HDC,
@@ -579,6 +595,54 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         Ok(hwnd as isize)
     }
 
+    fn resize_wallpaper_host_window(
+        &mut self,
+        window_hwnd: isize,
+        display: &DisplayInfo,
+    ) -> Result<(), PlatformError> {
+        let hwnd = window_hwnd as HWND;
+        if hwnd.is_null() {
+            return Ok(());
+        }
+        // SAFETY: IsWindow checks if the host HWND is still alive.
+        if unsafe { IsWindow(hwnd) } == 0 {
+            return Err(PlatformError::WindowCreationFailed(format!(
+                "Host window 0x{window_hwnd:X} is no longer valid"
+            )));
+        }
+
+        let workerw = self.get_or_spawn_workerw()?;
+        // SAFETY: RECT is a plain-old-data C struct safe to zero-initialize.
+        let mut workerw_rect: RECT = unsafe { mem::zeroed() };
+        // SAFETY: GetWindowRect populates workerw_rect for the valid workerw handle.
+        let (rel_left, rel_top) = if unsafe { GetWindowRect(workerw, &mut workerw_rect) } != 0 {
+            (
+                display.left - workerw_rect.left,
+                display.top - workerw_rect.top,
+            )
+        } else {
+            (display.left, display.top)
+        };
+
+        // SAFETY: SetWindowPos updates the host child window position and physical pixel size.
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                rel_left,
+                rel_top,
+                display.width as i32,
+                display.height as i32,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+            );
+        }
+
+        if let Some(player) = self.players.get(&window_hwnd) {
+            player.notify_host_resized();
+        }
+        Ok(())
+    }
+
     fn destroy_wallpaper_host_window(&mut self, window_hwnd: isize) -> Result<(), PlatformError> {
         if let Some(mut player) = self.players.remove(&window_hwnd) {
             player.shutdown();
@@ -700,6 +764,180 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         }
         Ok(())
     }
+
+    fn query_video_telemetry(&self, window_hwnd: isize) -> Option<VideoPlaybackTelemetry> {
+        let player = self.players.get(&window_hwnd)?;
+        let native_resolution = player.native_video_size();
+        let (position_ms, duration_ms) = match player.playback_progress() {
+            Some((pos, dur)) => (Some(pos.as_millis() as u64), Some(dur.as_millis() as u64)),
+            None => (None, None),
+        };
+        Some(VideoPlaybackTelemetry {
+            native_resolution,
+            position_ms,
+            duration_ms,
+        })
+    }
+
+    fn query_process_metrics(&self) -> Option<ProcessResourceMetrics> {
+        // SAFETY: GetCurrentProcess returns a pseudo-handle to the current process.
+        let h_proc = unsafe { GetCurrentProcess() };
+
+        // SAFETY: PROCESS_MEMORY_COUNTERS is a plain C struct safe to zero-initialize.
+        let mut mem_counters: PROCESS_MEMORY_COUNTERS = unsafe { mem::zeroed() };
+        mem_counters.cb = mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+
+        // SAFETY: K32GetProcessMemoryInfo populates mem_counters for the current process.
+        let mem_ok = unsafe {
+            K32GetProcessMemoryInfo(
+                h_proc,
+                &mut mem_counters,
+                mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            )
+        };
+        if mem_ok == 0 {
+            return None;
+        }
+
+        // SAFETY: FILETIME is a plain C struct safe to zero-initialize.
+        let mut creation_time: FILETIME = unsafe { mem::zeroed() };
+        // SAFETY: FILETIME is a plain C struct safe to zero-initialize.
+        let mut exit_time: FILETIME = unsafe { mem::zeroed() };
+        // SAFETY: FILETIME is a plain C struct safe to zero-initialize.
+        let mut kernel_time: FILETIME = unsafe { mem::zeroed() };
+        // SAFETY: FILETIME is a plain C struct safe to zero-initialize.
+        let mut user_time: FILETIME = unsafe { mem::zeroed() };
+
+        // SAFETY: GetProcessTimes writes 100ns process CPU times into the valid FILETIME structs.
+        let cpu_time_ms = if unsafe {
+            GetProcessTimes(
+                h_proc,
+                &mut creation_time,
+                &mut exit_time,
+                &mut kernel_time,
+                &mut user_time,
+            )
+        } != 0
+        {
+            let k_100ns = (u64::from(kernel_time.dwHighDateTime) << 32)
+                | u64::from(kernel_time.dwLowDateTime);
+            let u_100ns =
+                (u64::from(user_time.dwHighDateTime) << 32) | u64::from(user_time.dwLowDateTime);
+            (k_100ns.saturating_add(u_100ns)) / 10_000
+        } else {
+            0
+        };
+
+        Some(ProcessResourceMetrics {
+            working_set_bytes: mem_counters.WorkingSetSize as u64,
+            peak_working_set_bytes: mem_counters.PeakWorkingSetSize as u64,
+            cpu_time_ms,
+        })
+    }
+
+    fn set_launch_at_startup(&mut self, enabled: bool) -> Result<(), PlatformError> {
+        let subkey = wide_string(RUN_REGISTRY_SUBKEY);
+        let value_name = wide_string(RUN_REGISTRY_VALUE_NAME);
+        let mut hkey: HKEY = std::ptr::null_mut();
+
+        // SAFETY: RegOpenKeyExW opens HKCU\Software\Microsoft\Windows\CurrentVersion\Run with KEY_SET_VALUE.
+        let status = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                KEY_SET_VALUE,
+                &mut hkey,
+            )
+        };
+        if status != 0 || hkey.is_null() {
+            return Err(PlatformError::WindowCreationFailed(format!(
+                "Failed to open Windows startup registry key (Win32 status {status})"
+            )));
+        }
+
+        let result = if enabled {
+            let exe_path = std::env::current_exe().map_err(|e| {
+                PlatformError::WindowCreationFailed(format!(
+                    "Failed to resolve current executable path: {e}"
+                ))
+            })?;
+            let clean_exe = exe_path
+                .to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_string();
+            let command = format!("\"{clean_exe}\" gui --minimized");
+            let cmd_wide = wide_string(&command);
+            let byte_len = (cmd_wide.len() * mem::size_of::<u16>()) as u32;
+
+            // SAFETY: RegSetValueExW writes the null-terminated UTF-16 REG_SZ startup command.
+            let set_status = unsafe {
+                RegSetValueExW(
+                    hkey,
+                    value_name.as_ptr(),
+                    0,
+                    REG_SZ,
+                    cmd_wide.as_ptr().cast::<u8>(),
+                    byte_len,
+                )
+            };
+            if set_status == 0 {
+                Ok(())
+            } else {
+                Err(PlatformError::WindowCreationFailed(format!(
+                    "RegSetValueExW failed with status {set_status}"
+                )))
+            }
+        } else {
+            // SAFETY: RegDeleteValueW removes the Auralis value; status 2 (ERROR_FILE_NOT_FOUND) is also success.
+            let del_status = unsafe { RegDeleteValueW(hkey, value_name.as_ptr()) };
+            if del_status == 0 || del_status == 2 {
+                Ok(())
+            } else {
+                Err(PlatformError::WindowCreationFailed(format!(
+                    "RegDeleteValueW failed with status {del_status}"
+                )))
+            }
+        };
+
+        // SAFETY: RegCloseKey closes the opened registry key handle.
+        unsafe {
+            RegCloseKey(hkey);
+        }
+        result
+    }
+
+    fn is_launch_at_startup_enabled(&self) -> bool {
+        let subkey = wide_string(RUN_REGISTRY_SUBKEY);
+        let value_name = wide_string(RUN_REGISTRY_VALUE_NAME);
+        let mut hkey: HKEY = std::ptr::null_mut();
+
+        // SAFETY: RegOpenKeyExW opens HKCU\Software\Microsoft\Windows\CurrentVersion\Run with KEY_READ.
+        let status =
+            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) };
+        if status != 0 || hkey.is_null() {
+            return false;
+        }
+
+        let mut data_type: u32 = 0;
+        let mut data_len: u32 = 0;
+        // SAFETY: RegQueryValueExW checks whether the "Auralis" REG_SZ value exists and is non-empty.
+        let query_status = unsafe {
+            RegQueryValueExW(
+                hkey,
+                value_name.as_ptr(),
+                std::ptr::null(),
+                &mut data_type,
+                std::ptr::null_mut(),
+                &mut data_len,
+            )
+        };
+        // SAFETY: RegCloseKey closes the opened registry key handle.
+        unsafe {
+            RegCloseKey(hkey);
+        }
+        query_status == 0 && data_type == REG_SZ && data_len > 2
+    }
 }
 
 /// Derive a stable, alphanumeric display identifier from the Win32 `szDevice` string
@@ -778,6 +1016,16 @@ mod tests {
     }
 
     #[test]
+    fn test_query_process_metrics_windows() {
+        let adapter = WindowsPlatformAdapter::new();
+        let metrics = adapter.query_process_metrics();
+        assert!(metrics.is_some());
+        let m = metrics.unwrap();
+        assert!(m.working_set_bytes > 0);
+        assert!(m.peak_working_set_bytes >= m.working_set_bytes);
+    }
+
+    #[test]
     fn test_fullscreen_occlusion_query_does_not_fail() {
         let adapter = WindowsPlatformAdapter::new();
         let displays = adapter.enumerate_displays().unwrap();
@@ -793,6 +1041,7 @@ mod tests {
         match adapter.create_wallpaper_host_window(primary) {
             Ok(hwnd) => {
                 assert_ne!(hwnd, 0);
+                assert!(adapter.resize_wallpaper_host_window(hwnd, primary).is_ok());
                 assert!(adapter.destroy_wallpaper_host_window(hwnd).is_ok());
             }
             Err(PlatformError::DesktopWindowNotFound) => {

@@ -20,6 +20,7 @@ pub use engine::WallpaperEngine;
 pub use media::{MediaController, PlaybackState};
 pub use platform::{
     create_platform_adapter, DisplayInfo, PlatformAdapter, PlatformError, PowerStatus,
+    ProcessResourceMetrics, VideoPlaybackTelemetry,
 };
 
 /// Supported platform capabilities detected at runtime.

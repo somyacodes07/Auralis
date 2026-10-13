@@ -56,6 +56,28 @@ impl PowerStatus {
     }
 }
 
+/// Live hardware playback telemetry for an active video wallpaper.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VideoPlaybackTelemetry {
+    /// Decoded native video width and height in pixels, if reported by hardware decoder.
+    pub native_resolution: Option<(u32, u32)>,
+    /// Current playback timestamp in milliseconds.
+    pub position_ms: Option<u64>,
+    /// Total media stream duration in milliseconds.
+    pub duration_ms: Option<u64>,
+}
+
+/// Measured runtime resource usage of the current Auralis process (`AGENTS.md` Principle 7).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProcessResourceMetrics {
+    /// Current physical RAM working set in bytes.
+    pub working_set_bytes: u64,
+    /// Peak physical RAM working set in bytes.
+    pub peak_working_set_bytes: u64,
+    /// Cumulative process CPU time (kernel + user) in milliseconds.
+    pub cpu_time_ms: u64,
+}
+
 /// Errors occurring within platform-specific wallpaper layering or display management.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlatformError {
@@ -124,6 +146,16 @@ pub trait PlatformAdapter: Send + Sync {
         display: &DisplayInfo,
     ) -> Result<isize, PlatformError>;
 
+    /// Resize and reposition an existing wallpaper host window when its target display changes
+    /// resolution or virtual desktop coordinates.
+    fn resize_wallpaper_host_window(
+        &mut self,
+        _window_hwnd: isize,
+        _display: &DisplayInfo,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
     /// Cleanly detach and destroy a previously created native wallpaper host window.
     fn destroy_wallpaper_host_window(&mut self, window_hwnd: isize) -> Result<(), PlatformError>;
 
@@ -184,6 +216,27 @@ pub trait PlatformAdapter: Send + Sync {
         _loop_playback: bool,
     ) -> Result<(), PlatformError> {
         Ok(())
+    }
+
+    /// Query live hardware video playback telemetry (native resolution, position, duration)
+    /// for the specified host window handle.
+    fn query_video_telemetry(&self, _window_hwnd: isize) -> Option<VideoPlaybackTelemetry> {
+        None
+    }
+
+    /// Query measured physical RAM working set and CPU time of the current Auralis process.
+    fn query_process_metrics(&self) -> Option<ProcessResourceMetrics> {
+        None
+    }
+
+    /// Configure OS login startup registration (`launch_at_startup`).
+    fn set_launch_at_startup(&mut self, _enabled: bool) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    /// Query whether OS login startup registration is currently active.
+    fn is_launch_at_startup_enabled(&self) -> bool {
+        false
     }
 }
 

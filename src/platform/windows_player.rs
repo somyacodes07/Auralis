@@ -430,6 +430,61 @@ impl MfVideoPlayer {
         }
     }
 
+    /// Query the native decoded video dimensions `(width, height)` in pixels.
+    #[must_use]
+    pub fn native_video_size(&self) -> Option<(u32, u32)> {
+        #[repr(C)]
+        #[derive(Default)]
+        struct WinSize {
+            cx: i32,
+            cy: i32,
+        }
+
+        let player = self.as_ptr();
+        if player.is_null() {
+            return None;
+        }
+        let mut video_sz = WinSize::default();
+        let mut ar_sz = WinSize::default();
+        // SAFETY: GetNativeVideoSize writes width/height into valid WinSize structs.
+        let hr = unsafe {
+            ((*(*player).vtbl).get_native_video_size)(
+                player,
+                (&mut video_sz as *mut WinSize).cast::<c_void>(),
+                (&mut ar_sz as *mut WinSize).cast::<c_void>(),
+            )
+        };
+        if hr >= 0 && video_sz.cx > 0 && video_sz.cy > 0 {
+            Some((video_sz.cx as u32, video_sz.cy as u32))
+        } else {
+            None
+        }
+    }
+
+    /// Query the current `(position, duration)` of the active media stream.
+    #[must_use]
+    pub fn playback_progress(&self) -> Option<(Duration, Duration)> {
+        let dur_100ns = self
+            .duration_100ns
+            .or_else(|| self.query_duration_100ns())?;
+        let pos_100ns = self.query_position_100ns()?;
+        let dur = Duration::from_nanos((dur_100ns.max(0) as u64).saturating_mul(100));
+        let pos = Duration::from_nanos((pos_100ns.max(0) as u64).saturating_mul(100));
+        Some((pos.min(dur), dur))
+    }
+
+    /// Notify EVR that the host window bounds changed (e.g. on `WM_DISPLAYCHANGE`).
+    pub fn notify_host_resized(&self) {
+        let player = self.as_ptr();
+        if player.is_null() {
+            return;
+        }
+        // SAFETY: Invokes UpdateVideo on valid IMFPMediaPlayer pointer after a host window resize.
+        unsafe {
+            let _ = ((*(*player).vtbl).update_video)(player);
+        }
+    }
+
     /// Seek directly to a 100-nanosecond timestamp without stopping the presentation clock.
     fn seek_100ns(&self, position_100ns: i64) -> Result<(), PlatformError> {
         let player = self.as_ptr();
