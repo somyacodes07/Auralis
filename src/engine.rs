@@ -275,9 +275,15 @@ impl WallpaperEngine {
     pub fn evaluate_policy(&mut self) -> Result<(), PlatformError> {
         if self.system_sleeping {
             for (id, controller) in &mut self.controllers {
+                let was_playing = matches!(
+                    controller.state,
+                    crate::media::PlaybackState::Playing { .. }
+                );
                 controller.pause();
-                if let Some(&hwnd) = self.host_windows.get(id) {
-                    let _ = self.adapter.pause_video_playback(hwnd);
+                if was_playing {
+                    if let Some(&hwnd) = self.host_windows.get(id) {
+                        let _ = self.adapter.pause_video_playback(hwnd);
+                    }
                 }
             }
             return Ok(());
@@ -286,9 +292,15 @@ impl WallpaperEngine {
         let power = self.adapter.query_power_status()?;
         if self.config.pause_on_battery && power.should_conserve_power() {
             for (id, controller) in &mut self.controllers {
+                let was_playing = matches!(
+                    controller.state,
+                    crate::media::PlaybackState::Playing { .. }
+                );
                 controller.pause();
-                if let Some(&hwnd) = self.host_windows.get(id) {
-                    let _ = self.adapter.pause_video_playback(hwnd);
+                if was_playing {
+                    if let Some(&hwnd) = self.host_windows.get(id) {
+                        let _ = self.adapter.pause_video_playback(hwnd);
+                    }
                 }
             }
             return Ok(());
@@ -299,9 +311,15 @@ impl WallpaperEngine {
                 && self.adapter.is_display_occluded_by_fullscreen(display);
             if let Some(controller) = self.controllers.get_mut(&display.id) {
                 if occluded || self.user_paused.contains(&display.id) {
+                    let was_playing = matches!(
+                        controller.state,
+                        crate::media::PlaybackState::Playing { .. }
+                    );
                     controller.pause();
-                    if let Some(&hwnd) = self.host_windows.get(&display.id) {
-                        let _ = self.adapter.pause_video_playback(hwnd);
+                    if was_playing {
+                        if let Some(&hwnd) = self.host_windows.get(&display.id) {
+                            let _ = self.adapter.pause_video_playback(hwnd);
+                        }
                     }
                 } else {
                     let was_paused =

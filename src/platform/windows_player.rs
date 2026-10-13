@@ -5,10 +5,15 @@
 
 use super::PlatformError;
 use std::ffi::c_void;
+use std::mem;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+};
 
 /// Media player state constants from `MFP_MEDIAPLAYER_STATE` in `mfplay.h`.
 pub const MFP_STATE_EMPTY: u32 = 0;
@@ -16,6 +21,13 @@ pub const MFP_STATE_STOPPED: u32 = 1;
 pub const MFP_STATE_PLAYING: u32 = 2;
 pub const MFP_STATE_PAUSED: u32 = 3;
 pub const MFP_STATE_SHUTDOWN: u32 = 4;
+
+/// Variant type tag `VT_I8` (signed 64-bit integer) used for 100-nanosecond media positions.
+const VT_I8: u16 = 20;
+
+/// Threshold before end-of-stream (150ms in 100-nanosecond units) at which seamless loop
+/// seeks back to position `0` while keeping the presentation clock active.
+const LOOP_SEEK_THRESHOLD_100NS: i64 = 1_500_000;
 
 type HResult = i32;
 
@@ -27,6 +39,28 @@ type FnMfpCreateMediaPlayer = unsafe extern "system" fn(
     hwnd: HWND,
     pp_media_player: *mut *mut ImfpMediaPlayer,
 ) -> HResult;
+
+/// 16-byte GUID structure (`MFP_POSITIONTYPE_100NS` is `GUID::zeroed()`).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Guid {
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+}
+
+/// 24-byte `PROPVARIANT` layout for `VT_I8` (`LARGE_INTEGER` 100ns position/duration values).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PropVariantI64 {
+    vt: u16,
+    w_reserved1: u16,
+    w_reserved2: u16,
+    w_reserved3: u16,
+    h_val: i64,
+    padding: u64,
+}
 
 #[repr(C)]
 struct IUnknownVtbl {
@@ -63,18 +97,18 @@ struct ImfpMediaPlayerVtbl {
     frame_step: unsafe extern "system" fn(this: *mut ImfpMediaPlayer) -> HResult,
     set_position: unsafe extern "system" fn(
         this: *mut ImfpMediaPlayer,
-        guid_position_type: *const c_void,
-        pv_position_value: *const c_void,
+        guid_position_type: *const Guid,
+        pv_position_value: *const PropVariantI64,
     ) -> HResult,
     get_position: unsafe extern "system" fn(
         this: *mut ImfpMediaPlayer,
-        guid_position_type: *const c_void,
-        pv_position_value: *mut c_void,
+        guid_position_type: *const Guid,
+        pv_position_value: *mut PropVariantI64,
     ) -> HResult,
     get_duration: unsafe extern "system" fn(
         this: *mut ImfpMediaPlayer,
-        guid_position_type: *const c_void,
-        pv_duration_value: *mut c_void,
+        guid_position_type: *const Guid,
+        pv_duration_value: *mut PropVariantI64,
     ) -> HResult,
     set_rate: unsafe extern "system" fn(this: *mut ImfpMediaPlayer, fl_rate: f32) -> HResult,
     get_rate: unsafe extern "system" fn(this: *mut ImfpMediaPlayer, pfl_rate: *mut f32) -> HResult,
@@ -164,12 +198,23 @@ struct ImfpMediaPlayer {
 pub struct MfVideoPlayer {
     /// Raw COM pointer stored as `usize` so the wrapper can be held inside the platform adapter.
     player_ptr: usize,
+    /// Cached total media duration in 100-nanosecond units, if known.
+    duration_100ns: Option<i64>,
+    /// Desired mute state.
+    muted: bool,
+    /// Desired volume (`0..=100`).
+    volume: u8,
+    /// Whether one-time EVR surface/aspect initialization has been applied after entering `PLAYING`.
+    evr_initialized: bool,
 }
 
 impl std::fmt::Debug for MfVideoPlayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MfVideoPlayer")
             .field("player_ptr", &format_args!("0x{:X}", self.player_ptr))
+            .field("duration_100ns", &self.duration_100ns)
+            .field("muted", &self.muted)
+            .field("volume", &self.volume)
             .finish()
     }
 }
@@ -192,12 +237,25 @@ impl MfVideoPlayer {
         match proc_addr {
             Some(addr) => {
                 // SAFETY: Signature matches `MFPCreateMediaPlayer` in `mfplay.h`.
-                let func: FnMfpCreateMediaPlayer = unsafe { std::mem::transmute(addr) };
+                let func: FnMfpCreateMediaPlayer = unsafe { mem::transmute(addr) };
                 Ok(func)
             }
             None => Err(PlatformError::MediaPlaybackFailed(
                 "Could not resolve MFPCreateMediaPlayer in mfplay.dll".to_string(),
             )),
+        }
+    }
+
+    /// Pump pending thread messages briefly so MFPlay can process asynchronous `SetMediaItem`
+    /// topology binding on the apartment thread.
+    fn pump_pending_messages() {
+        // SAFETY: Standard non-blocking PeekMessageW loop for the current thread.
+        unsafe {
+            let mut msg: MSG = mem::zeroed();
+            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
     }
 
@@ -216,8 +274,7 @@ impl MfVideoPlayer {
         }
 
         // Ensure COM is initialized on the calling thread
-        // SAFETY: CoInitializeEx is safe to call multiple times on a thread; S_OK (0) or S_FALSE (1)
-        // or RPC_E_CHANGED_MODE are handled gracefully.
+        // SAFETY: CoInitializeEx is safe to call multiple times on a thread.
         unsafe {
             let _ = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
         }
@@ -255,8 +312,12 @@ impl MfVideoPlayer {
             )));
         }
 
-        let instance = Self {
+        let mut instance = Self {
             player_ptr: player as usize,
+            duration_100ns: None,
+            muted,
+            volume: volume.min(100),
+            evr_initialized: false,
         };
 
         // Load media item synchronously so invalid/corrupt files are caught immediately
@@ -292,15 +353,21 @@ impl MfVideoPlayer {
             )));
         }
 
-        // Configure borderless stretch-to-fill or aspect ratio and audio settings
-        // SAFETY: Calls SetAspectRatioMode(0 = stretch to fill monitor) and SetBorderColor(black).
-        unsafe {
-            let _ = ((*(*player).vtbl).set_aspect_ratio_mode)(player, 0);
-            let _ = ((*(*player).vtbl).set_border_color)(player, 0x0000_0000);
+        // Allow MFPlay's internal worker message to finish binding the topology to EVR
+        let wait_start = Instant::now();
+        while wait_start.elapsed() < Duration::from_millis(350) {
+            Self::pump_pending_messages();
+            if instance.state().unwrap_or(MFP_STATE_EMPTY) != MFP_STATE_EMPTY {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
 
-        instance.set_audio(muted, volume)?;
+        instance.apply_evr_and_audio_settings();
         instance.play()?;
+        Self::pump_pending_messages();
+        instance.apply_evr_and_audio_settings();
+        instance.duration_100ns = instance.query_duration_100ns();
 
         Ok(instance)
     }
@@ -308,6 +375,84 @@ impl MfVideoPlayer {
     #[inline]
     fn as_ptr(&self) -> *mut ImfpMediaPlayer {
         self.player_ptr as *mut ImfpMediaPlayer
+    }
+
+    /// Apply EVR full-window aspect mode (`0`), black border color, audio mute/volume,
+    /// and a single `UpdateVideo` geometry sync.
+    fn apply_evr_and_audio_settings(&self) {
+        let player = self.as_ptr();
+        if player.is_null() {
+            return;
+        }
+        let clamped_vol = (f32::from(self.volume.min(100))) / 100.0;
+        // SAFETY: Invokes EVR and audio configuration methods on valid IMFPMediaPlayer pointer.
+        unsafe {
+            let _ = ((*(*player).vtbl).set_aspect_ratio_mode)(player, 0);
+            let _ = ((*(*player).vtbl).set_border_color)(player, 0x0000_0000);
+            let _ = ((*(*player).vtbl).set_mute)(player, i32::from(self.muted));
+            let _ = ((*(*player).vtbl).set_volume)(player, clamped_vol);
+            let _ = ((*(*player).vtbl).update_video)(player);
+        }
+    }
+
+    /// Query the total media duration in 100-nanosecond units (`MFP_POSITIONTYPE_100NS`).
+    fn query_duration_100ns(&self) -> Option<i64> {
+        let player = self.as_ptr();
+        if player.is_null() {
+            return None;
+        }
+        let pos_type = Guid::default();
+        let mut prop = PropVariantI64::default();
+        // SAFETY: GetDuration populates `prop` when the media item has a known duration.
+        let hr = unsafe { ((*(*player).vtbl).get_duration)(player, &pos_type, &mut prop) };
+        if hr >= 0 && prop.vt == VT_I8 && prop.h_val > 0 {
+            Some(prop.h_val)
+        } else {
+            None
+        }
+    }
+
+    /// Query the current playback position in 100-nanosecond units (`MFP_POSITIONTYPE_100NS`).
+    fn query_position_100ns(&self) -> Option<i64> {
+        let player = self.as_ptr();
+        if player.is_null() {
+            return None;
+        }
+        let pos_type = Guid::default();
+        let mut prop = PropVariantI64::default();
+        // SAFETY: GetPosition populates `prop` with the current presentation clock time.
+        let hr = unsafe { ((*(*player).vtbl).get_position)(player, &pos_type, &mut prop) };
+        if hr >= 0 && prop.vt == VT_I8 {
+            Some(prop.h_val)
+        } else {
+            None
+        }
+    }
+
+    /// Seek directly to a 100-nanosecond timestamp without stopping the presentation clock.
+    fn seek_100ns(&self, position_100ns: i64) -> Result<(), PlatformError> {
+        let player = self.as_ptr();
+        if player.is_null() {
+            return Ok(());
+        }
+        let pos_type = Guid::default();
+        let prop = PropVariantI64 {
+            vt: VT_I8,
+            w_reserved1: 0,
+            w_reserved2: 0,
+            w_reserved3: 0,
+            h_val: position_100ns.max(0),
+            padding: 0,
+        };
+        // SAFETY: SetPosition seeks to `position_100ns` using `MFP_POSITIONTYPE_100NS`.
+        let hr = unsafe { ((*(*player).vtbl).set_position)(player, &pos_type, &prop) };
+        if hr < 0 {
+            return Err(PlatformError::MediaPlaybackFailed(format!(
+                "IMFPMediaPlayer::SetPosition failed (0x{:08X})",
+                hr as u32
+            )));
+        }
+        Ok(())
     }
 
     /// Start or resume playback.
@@ -364,12 +509,14 @@ impl MfVideoPlayer {
     }
 
     /// Configure mute state and volume (`0..=100`).
-    pub fn set_audio(&self, muted: bool, volume: u8) -> Result<(), PlatformError> {
+    pub fn set_audio(&mut self, muted: bool, volume: u8) -> Result<(), PlatformError> {
+        self.muted = muted;
+        self.volume = volume.min(100);
         let player = self.as_ptr();
         if player.is_null() {
             return Ok(());
         }
-        let clamped_vol = (f32::from(volume.min(100))) / 100.0;
+        let clamped_vol = (f32::from(self.volume)) / 100.0;
         // SAFETY: Invokes SetMute and SetVolume on valid COM interface pointer.
         unsafe {
             let _ = ((*(*player).vtbl).set_mute)(player, i32::from(muted));
@@ -396,23 +543,45 @@ impl MfVideoPlayer {
         Ok(state)
     }
 
-    /// Periodic tick called by the runtime loop to enforce seamless looping and repaint video.
-    pub fn tick(&self, loop_playback: bool) -> Result<(), PlatformError> {
+    /// Periodic tick called by the runtime loop to enforce seamless looping without calling
+    /// `UpdateVideo` repeatedly during active hardware presentation (which would cause flicker).
+    pub fn tick(&mut self, loop_playback: bool) -> Result<(), PlatformError> {
         let player = self.as_ptr();
         if player.is_null() {
             return Ok(());
         }
 
         let current_state = self.state()?;
-        if loop_playback && current_state == MFP_STATE_STOPPED {
-            // Reached end of stream; Play() restarts from position 0
+        if current_state == MFP_STATE_PLAYING {
+            if !self.evr_initialized {
+                self.apply_evr_and_audio_settings();
+                self.evr_initialized = true;
+            }
+
+            if !loop_playback {
+                return Ok(());
+            }
+
+            let duration = self.duration_100ns.or_else(|| {
+                let d = self.query_duration_100ns();
+                self.duration_100ns = d;
+                d
+            });
+
+            if let (Some(dur), Some(pos)) = (duration, self.query_position_100ns()) {
+                if dur > LOOP_SEEK_THRESHOLD_100NS
+                    && pos >= dur.saturating_sub(LOOP_SEEK_THRESHOLD_100NS)
+                {
+                    // Seamless seek back to 0 while clock is still in PLAYING state
+                    let _ = self.seek_100ns(0);
+                }
+            }
+        } else if loop_playback && current_state == MFP_STATE_STOPPED {
+            // Fallback if a very short clip reached STOPPED state between ticks
+            let _ = self.seek_100ns(0);
             self.play()?;
         }
 
-        // SAFETY: UpdateVideo notifies the Enhanced Video Renderer to repaint if needed.
-        unsafe {
-            let _ = ((*(*player).vtbl).update_video)(player);
-        }
         Ok(())
     }
 

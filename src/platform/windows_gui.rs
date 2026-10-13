@@ -1,10 +1,11 @@
 //! Native Windows Configuration UI & Event Loop (`windows_gui.rs`)
 //!
-//! Provides a lightweight, native Win32 Configuration Studio window and message loop
-//! for selecting local videos, controlling playback/audio/looping, configuring power
-//! and full-screen policies, and running the wallpaper engine behind desktop icons.
+//! Provides a lightweight, DPI-aware, flicker-free Win32 Configuration Studio window
+//! and message loop for selecting local videos, controlling playback/audio/looping,
+//! configuring power and full-screen policies, and running the wallpaper engine behind
+//! desktop icons.
 
-use super::windows::{string_from_wide, wide_string};
+use super::windows::{string_from_wide, wide_string, WindowsPlatformAdapter};
 use crate::config::AppConfig;
 use crate::engine::WallpaperEngine;
 use crate::media::PlaybackState;
@@ -14,7 +15,11 @@ use std::cell::RefCell;
 use std::mem;
 use std::path::PathBuf;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{GetStockObject, COLOR_WINDOW, DEFAULT_GUI_FONT, HBRUSH};
+use windows_sys::Win32::Graphics::Gdi::{
+    CreateFontW, DeleteObject, GetDC, GetDeviceCaps, GetStockObject, ReleaseDC, CLEARTYPE_QUALITY,
+    CLIP_DEFAULT_PRECIS, COLOR_WINDOW, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DEFAULT_PITCH, FF_SWISS,
+    FW_NORMAL, HBRUSH, HFONT, LOGPIXELSY, OUT_TT_PRECIS,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
@@ -26,12 +31,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL,
     CB_SETCURSEL, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, MSG, SW_HIDE, SW_RESTORE,
     SW_SHOW, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_SETFONT, WM_TIMER, WNDCLASSW,
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE,
+    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 
 const WINDOW_CLASS_NAME: &str = "AuralisConfigStudioWindowClass";
 const WM_AURALIS_SHOW_UI: u32 = WM_APP + 1;
+
+/// `SS_NOPREFIX` prevents `STATIC` controls from interpreting `&` as an underline accelerator.
+const SS_NOPREFIX: u32 = 0x0080;
 
 const ID_CMB_DISPLAY: usize = 100;
 const ID_EDT_PATH: usize = 101;
@@ -49,7 +57,8 @@ const ID_BTN_HIDE: usize = 112;
 const ID_BTN_QUIT: usize = 113;
 
 const ID_TIMER_TICK: usize = 1;
-const TIMER_INTERVAL_MS: u32 = 400;
+/// 100ms tick interval ensures pre-EOS seamless loop seeking and responsive policy updates.
+const TIMER_INTERVAL_MS: u32 = 100;
 
 const BST_CHECKED: usize = 1;
 const BST_UNCHECKED: usize = 0;
@@ -57,6 +66,7 @@ const BST_UNCHECKED: usize = 0;
 struct GuiState {
     engine: WallpaperEngine,
     config_path: PathBuf,
+    ui_font: HFONT,
     cmb_display: HWND,
     edt_path: HWND,
     chk_mute: HWND,
@@ -66,14 +76,36 @@ struct GuiState {
     chk_battery: HWND,
     lbl_status: HWND,
     last_error: Option<String>,
+    last_status_text: String,
 }
 
 thread_local! {
     static GUI_STATE: RefCell<Option<GuiState>> = const { RefCell::new(None) };
 }
 
+/// Query the current system DPI scaling factor relative to 96 DPI (e.g. `1.25` at 125% scaling).
+fn query_dpi_scale() -> (i32, f32) {
+    // SAFETY: GetDC(null) retrieves the screen DC to query logical DPI via GetDeviceCaps.
+    unsafe {
+        let hdc = GetDC(std::ptr::null_mut());
+        if hdc.is_null() {
+            return (96, 1.0);
+        }
+        let dpi = GetDeviceCaps(hdc, LOGPIXELSY as i32).max(96);
+        ReleaseDC(std::ptr::null_mut(), hdc);
+        (dpi, (dpi as f32) / 96.0)
+    }
+}
+
+#[inline]
+fn scale_px(px: i32, scale: f32) -> i32 {
+    ((px as f32) * scale).round() as i32
+}
+
 /// Launch the native Windows Configuration UI and enter the Win32 message & playback loop.
 pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
+    WindowsPlatformAdapter::ensure_dpi_awareness();
+
     // If an Auralis Studio instance is already running in the background, bring its UI to front
     let class_wide = wide_string(WINDOW_CLASS_NAME);
     // SAFETY: FindWindowW checks for an existing Auralis configuration window on the desktop.
@@ -108,10 +140,34 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
         engine.restore_saved_wallpapers();
     }
 
+    let (dpi, scale) = query_dpi_scale();
+    let font_height = -((10 * dpi) / 72);
+    let font_face = wide_string("Segoe UI");
+    // SAFETY: CreateFontW creates a ClearType-antialiased Segoe UI font scaled to system DPI.
+    let ui_font = unsafe {
+        CreateFontW(
+            font_height,
+            0,
+            0,
+            0,
+            FW_NORMAL as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            OUT_TT_PRECIS as u32,
+            CLIP_DEFAULT_PRECIS as u32,
+            CLEARTYPE_QUALITY as u32,
+            (DEFAULT_PITCH | FF_SWISS) as u32,
+            font_face.as_ptr(),
+        )
+    };
+
     GUI_STATE.with(|cell| {
         *cell.borrow_mut() = Some(GuiState {
             engine,
             config_path,
+            ui_font,
             cmb_display: std::ptr::null_mut(),
             edt_path: std::ptr::null_mut(),
             chk_mute: std::ptr::null_mut(),
@@ -121,6 +177,7 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
             chk_battery: std::ptr::null_mut(),
             lbl_status: std::ptr::null_mut(),
             last_error: None,
+            last_status_text: String::new(),
         });
     });
 
@@ -144,7 +201,9 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
     unsafe { RegisterClassW(&wnd_class) };
 
     let title = wide_string(&format!("Auralis Live Wallpaper Studio v{VERSION}"));
-    let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE;
+    // WS_CLIPCHILDREN prevents the parent window from erasing over child buttons/labels on repaint.
+    let style =
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN | WS_VISIBLE;
 
     // SAFETY: CreateWindowExW creates the main configuration window and triggers WM_CREATE.
     let hwnd = unsafe {
@@ -155,8 +214,8 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            620,
-            470,
+            scale_px(640, scale),
+            scale_px(485, scale),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             hinstance,
@@ -182,6 +241,11 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
         if let Some(mut state) = cell.borrow_mut().take() {
             let _ = state.engine.config.save_to_file(&state.config_path);
             state.engine.shutdown();
+            if !state.ui_font.is_null() {
+                unsafe {
+                    DeleteObject(state.ui_font);
+                }
+            }
         }
     });
 
@@ -256,25 +320,32 @@ unsafe extern "system" fn window_proc(
 }
 
 fn create_child_controls(parent: HWND) {
-    // SAFETY: GetModuleHandleW and GetStockObject retrieve process instance and default GUI font.
+    let (_, scale) = query_dpi_scale();
+    // SAFETY: GetModuleHandleW and GetStockObject retrieve process instance and fallback font.
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    let hfont = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+    let hfont = GUI_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|s| s.ui_font)
+            .filter(|f| !f.is_null())
+            .unwrap_or_else(|| unsafe { GetStockObject(DEFAULT_GUI_FONT) })
+    });
 
     let mk_ctrl =
         |class: &str, text: &str, style: u32, x: i32, y: i32, w: i32, h: i32, id: usize| -> HWND {
             let cls = wide_string(class);
             let txt = wide_string(text);
-            // SAFETY: Creates a child Win32 control inside `parent` and applies the system UI font.
+            // SAFETY: Creates a DPI-scaled child Win32 control inside `parent` and applies Segoe UI font.
             unsafe {
                 let ctrl = CreateWindowExW(
                     0,
                     cls.as_ptr(),
                     txt.as_ptr(),
                     WS_CHILD | WS_VISIBLE | style,
-                    x,
-                    y,
-                    w,
-                    h,
+                    scale_px(x, scale),
+                    scale_px(y, scale),
+                    scale_px(w, scale),
+                    scale_px(h, scale),
                     parent,
                     id as *mut _,
                     hinstance,
@@ -290,76 +361,86 @@ fn create_child_controls(parent: HWND) {
     mk_ctrl(
         "STATIC",
         "Auralis Live Wallpaper Studio — Native Hardware-Decoded Video Engine",
-        0,
+        SS_NOPREFIX,
         20,
         16,
-        560,
-        22,
+        580,
+        24,
         0,
     );
 
-    mk_ctrl("STATIC", "Target Monitor:", 0, 20, 50, 110, 22, 0);
+    mk_ctrl("STATIC", "Target Monitor:", SS_NOPREFIX, 20, 52, 115, 24, 0);
     let cmb_display = mk_ctrl(
         "COMBOBOX",
         "",
         CBS_DROPDOWNLIST as u32 | WS_TABSTOP,
-        135,
-        46,
-        445,
-        200,
+        140,
+        48,
+        460,
+        220,
         ID_CMB_DISPLAY,
     );
 
-    mk_ctrl("STATIC", "Video File Path:", 0, 20, 88, 110, 22, 0);
+    mk_ctrl(
+        "STATIC",
+        "Video File Path:",
+        SS_NOPREFIX,
+        20,
+        90,
+        115,
+        24,
+        0,
+    );
     let edt_path = mk_ctrl(
         "EDIT",
         "",
         WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-        135,
-        85,
-        325,
-        26,
+        140,
+        86,
+        335,
+        28,
         ID_EDT_PATH,
     );
     mk_ctrl(
         "BUTTON",
         "Browse Video...",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        470,
-        84,
-        110,
-        28,
+        485,
+        85,
+        115,
+        30,
         ID_BTN_BROWSE,
     );
 
+    // Note: Double ampersand `&&` escapes Win32 accelerator prefix so `&` displays literally.
     mk_ctrl(
         "BUTTON",
-        "Apply & Play Wallpaper",
+        "Apply && Play Wallpaper",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         20,
-        128,
-        200,
-        34,
+        130,
+        205,
+        36,
         ID_BTN_APPLY,
     );
     mk_ctrl(
         "BUTTON",
         "Pause / Resume",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        235,
-        128,
-        165,
-        34,
+        240,
+        130,
+        170,
+        36,
         ID_BTN_PAUSE_RESUME,
     );
     mk_ctrl(
         "BUTTON",
-        "Stop & Clear",
+        "Stop && Clear",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        415,
-        128,
-        165,
-        34,
+        425,
+        130,
+        175,
+        36,
         ID_BTN_STOP,
     );
 
@@ -368,40 +449,40 @@ fn create_child_controls(parent: HWND) {
         "Mute Audio",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         20,
-        178,
+        180,
         130,
-        24,
+        26,
         ID_CHK_MUTE,
     );
     let chk_loop = mk_ctrl(
         "BUTTON",
         "Seamless Loop",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
-        160,
-        178,
-        140,
-        24,
+        165,
+        180,
+        145,
+        26,
         ID_CHK_LOOP,
     );
     mk_ctrl(
         "BUTTON",
         "Vol -",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        320,
-        176,
+        330,
+        178,
         65,
-        26,
+        28,
         ID_BTN_VOL_DOWN,
     );
-    let lbl_volume = mk_ctrl("STATIC", "Volume: 0%", 0, 395, 181, 110, 22, 0);
+    let lbl_volume = mk_ctrl("STATIC", "Volume: 0%", SS_NOPREFIX, 405, 183, 115, 24, 0);
     mk_ctrl(
         "BUTTON",
         "Vol +",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        515,
-        176,
+        535,
+        178,
         65,
-        26,
+        28,
         ID_BTN_VOL_UP,
     );
 
@@ -410,9 +491,9 @@ fn create_child_controls(parent: HWND) {
         "Pause wallpaper when a Full-Screen App or Game is active",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         20,
-        214,
-        540,
-        24,
+        216,
+        560,
+        26,
         ID_CHK_FULLSCREEN,
     );
     let chk_battery = mk_ctrl(
@@ -420,19 +501,19 @@ fn create_child_controls(parent: HWND) {
         "Pause wallpaper on Battery Power / Battery Saver",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         20,
-        242,
-        540,
-        24,
+        246,
+        560,
+        26,
         ID_CHK_BATTERY,
     );
 
     let lbl_status = mk_ctrl(
         "STATIC",
         "Initializing engine telemetry...",
-        WS_BORDER,
+        WS_BORDER | SS_NOPREFIX,
         20,
-        278,
-        560,
+        284,
+        580,
         92,
         0,
     );
@@ -442,19 +523,19 @@ fn create_child_controls(parent: HWND) {
         "Hide Window (Keep Wallpaper Playing)",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         20,
-        382,
-        270,
-        34,
+        390,
+        280,
+        36,
         ID_BTN_HIDE,
     );
     mk_ctrl(
         "BUTTON",
-        "Quit Auralis & Restore Desktop",
+        "Quit Auralis && Restore Desktop",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        310,
-        382,
-        270,
-        34,
+        320,
+        390,
+        280,
+        36,
         ID_BTN_QUIT,
     );
 
@@ -745,7 +826,7 @@ fn handle_command(hwnd: HWND, control_id: usize) {
 
 fn update_status_readout() {
     GUI_STATE.with(|cell| {
-        if let Some(state) = cell.borrow().as_ref() {
+        if let Some(state) = cell.borrow_mut().as_mut() {
             let display_id = selected_display_id(state);
             let state_desc = match state.engine.controller(&display_id).map(|c| &c.state) {
                 Some(PlaybackState::Playing { path, .. }) => {
@@ -789,8 +870,12 @@ fn update_status_readout() {
                 )
             };
 
-            let wide = wide_string(&status_line);
-            unsafe { SetWindowTextW(state.lbl_status, wide.as_ptr()) };
+            // Only call SetWindowTextW when the status string actually changes to prevent UI flicker
+            if status_line != state.last_status_text {
+                state.last_status_text.clone_from(&status_line);
+                let wide = wide_string(&status_line);
+                unsafe { SetWindowTextW(state.lbl_status, wide.as_ptr()) };
+            }
         }
     });
 }

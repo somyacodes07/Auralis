@@ -1,27 +1,32 @@
 //! Windows Native Platform Adapter
 //!
 //! Implements desktop wallpaper window layering behind desktop icons using the
-//! Progman / WorkerW message pump architecture, multi-display monitor enumeration,
-//! system power state inspection, and full-screen application occlusion detection.
+//! Progman / WorkerW message pump architecture, DPI-aware physical monitor enumeration,
+//! flicker-free host window management, system power state inspection, and accurate
+//! full-screen application occlusion detection.
 
 use super::windows_player::MfVideoPlayer;
 use super::{DisplayInfo, PlatformAdapter, PlatformError, PowerStatus};
 use std::collections::HashMap;
 use std::mem;
 use std::path::Path;
-use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+    EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, DEVMODEW, ENUM_CURRENT_SETTINGS,
+    HDC, HMONITOR, MONITORINFOEXW,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows_sys::Win32::System::StationsAndDesktops::{
     CloseDesktop, OpenDesktopW, SetThreadDesktop,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, EnumWindows, FindWindowExW, FindWindowW, GetForegroundWindow,
-    GetShellWindow, GetWindowRect, IsWindow, IsWindowVisible, SendMessageTimeoutW, SetParent,
-    SetWindowPos, SMTO_NORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, WS_EX_NOACTIVATE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, FindWindowExW, FindWindowW,
+    GetClassNameW, GetDesktopWindow, GetForegroundWindow, GetShellWindow, GetWindowLongPtrW,
+    GetWindowRect, IsIconic, IsWindow, IsWindowVisible, RegisterClassW, SendMessageTimeoutW,
+    SetParent, SetProcessDPIAware, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, HTTRANSPARENT,
+    SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, WM_ERASEBKGND,
+    WM_NCHITTEST, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
@@ -30,6 +35,12 @@ const WM_SPAWN_WORKERW: u32 = 0x052C;
 
 /// Desired access rights for opening the interactive Default desktop (`DESKTOP_ALL_ACCESS`).
 const DESKTOP_ACCESS_ALL: u32 = 0x01FF;
+
+/// Custom window class name for our flicker-free wallpaper host window.
+const WALLPAPER_HOST_CLASS_NAME: &str = "AuralisWallpaperHostWindowClass";
+
+/// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2` constant (`(DPI_AWARENESS_CONTEXT)-4`).
+const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
 
 /// Native Windows wallpaper layering and Media Foundation playback adapter.
 #[derive(Debug, Default)]
@@ -42,13 +53,43 @@ pub struct WindowsPlatformAdapter {
 }
 
 impl WindowsPlatformAdapter {
-    /// Create a new Windows platform adapter.
+    /// Create a new Windows platform adapter with Per-Monitor V2 DPI awareness and
+    /// interactive desktop attachment.
     #[must_use]
     pub fn new() -> Self {
+        Self::ensure_dpi_awareness();
         Self::ensure_interactive_desktop();
         Self {
             workerw_handle: None,
             players: HashMap::new(),
+        }
+    }
+
+    /// Enable Per-Monitor V2 DPI awareness on the current process so that monitor enumeration
+    /// and `WorkerW` child window coordinates operate in true physical pixels (e.g. `1920x1080`
+    /// rather than DPI-virtualized `1536x864` at 125% scaling).
+    pub fn ensure_dpi_awareness() {
+        type FnSetProcessDpiAwarenessContext = unsafe extern "system" fn(value: isize) -> BOOL;
+
+        let user32_name = wide_string("user32.dll");
+        // SAFETY: user32.dll is already loaded in every Win32 process.
+        let h_user32 = unsafe { GetModuleHandleW(user32_name.as_ptr()) };
+        if !h_user32.is_null() {
+            let proc_name = b"SetProcessDpiAwarenessContext\0";
+            // SAFETY: Resolves SetProcessDpiAwarenessContext from user32.dll if supported (Win10 1703+).
+            if let Some(addr) = unsafe { GetProcAddress(h_user32, proc_name.as_ptr()) } {
+                let set_ctx: FnSetProcessDpiAwarenessContext = unsafe { mem::transmute(addr) };
+                let ok = unsafe { set_ctx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+                if ok != 0 {
+                    return;
+                }
+            }
+        }
+
+        // Fallback to system DPI awareness
+        // SAFETY: SetProcessDPIAware marks the process as system DPI aware.
+        unsafe {
+            let _ = SetProcessDPIAware();
         }
     }
 
@@ -76,6 +117,47 @@ impl WindowsPlatformAdapter {
         }
     }
 
+    /// Register the custom flicker-free window class for wallpaper host windows.
+    fn register_wallpaper_host_class() {
+        unsafe extern "system" fn wallpaper_host_wnd_proc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            match msg {
+                // Never erase background with a solid brush; EVR owns the entire surface.
+                // This eliminates background repaint flicker during video presentation.
+                WM_ERASEBKGND => 1,
+                // Pass mouse hit-testing through to the desktop icon layer.
+                WM_NCHITTEST => HTTRANSPARENT as LRESULT,
+                _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+            }
+        }
+
+        let class_name = wide_string(WALLPAPER_HOST_CLASS_NAME);
+        // SAFETY: GetModuleHandleW(null) retrieves the current executable's HINSTANCE.
+        let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
+
+        let wnd_class = WNDCLASSW {
+            style: 0, // No CS_HREDRAW | CS_VREDRAW to prevent full-surface invalidation flicker
+            lpfnWndProc: Some(wallpaper_host_wnd_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinstance,
+            hIcon: std::ptr::null_mut(),
+            hCursor: std::ptr::null_mut(),
+            hbrBackground: std::ptr::null_mut(), // Null brush prevents white/gray background flash
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: class_name.as_ptr(),
+        };
+
+        // SAFETY: RegisterClassW is idempotent if already registered for this module.
+        unsafe {
+            RegisterClassW(&wnd_class);
+        }
+    }
+
     /// Locate or spawn the WorkerW window layered directly behind desktop icons.
     pub fn get_or_spawn_workerw(&mut self) -> Result<HWND, PlatformError> {
         if let Some(hwnd_val) = self.workerw_handle {
@@ -87,6 +169,7 @@ impl WindowsPlatformAdapter {
             self.workerw_handle = None;
         }
 
+        Self::ensure_dpi_awareness();
         Self::ensure_interactive_desktop();
 
         let progman_class = wide_string("Progman");
@@ -196,6 +279,7 @@ impl WindowsPlatformAdapter {
 
 impl PlatformAdapter for WindowsPlatformAdapter {
     fn enumerate_displays(&self) -> Result<Vec<DisplayInfo>, PlatformError> {
+        Self::ensure_dpi_awareness();
         let mut displays = Vec::new();
 
         unsafe extern "system" fn monitor_enum_proc(
@@ -214,9 +298,35 @@ impl PlatformAdapter for WindowsPlatformAdapter {
             // SAFETY: GetMonitorInfoW is called with a valid hmonitor and properly sized MONITORINFOEXW struct.
             if unsafe { GetMonitorInfoW(hmonitor, &mut info as *mut _ as *mut _) } != 0 {
                 let rect = info.monitorInfo.rcMonitor;
-                let width = (rect.right - rect.left).unsigned_abs();
-                let height = (rect.bottom - rect.top).unsigned_abs();
+                let mut left = rect.left;
+                let mut top = rect.top;
+                let mut width = (rect.right - rect.left).unsigned_abs();
+                let mut height = (rect.bottom - rect.top).unsigned_abs();
                 let is_primary = (info.monitorInfo.dwFlags & 1) != 0;
+
+                // Query true hardware physical pixel dimensions via EnumDisplaySettingsW
+                // so DPI scaling (e.g., 125% scaling turning 1920x1080 into 1536x864) never
+                // shrinks the wallpaper below full-screen physical resolution.
+                let mut devmode: DEVMODEW = unsafe { mem::zeroed() };
+                devmode.dmSize = mem::size_of::<DEVMODEW>() as u16;
+                // SAFETY: EnumDisplaySettingsW queries active hardware display mode for szDevice.
+                if unsafe {
+                    EnumDisplaySettingsW(
+                        info.szDevice.as_ptr(),
+                        ENUM_CURRENT_SETTINGS,
+                        &mut devmode,
+                    )
+                } != 0
+                    && devmode.dmPelsWidth > 0
+                    && devmode.dmPelsHeight > 0
+                {
+                    width = devmode.dmPelsWidth;
+                    height = devmode.dmPelsHeight;
+                    // Position fields in DEVMODEW union1.s2.dmPosition
+                    let pos = unsafe { devmode.Anonymous1.Anonymous2.dmPosition };
+                    left = pos.x;
+                    top = pos.y;
+                }
 
                 let dev_name = string_from_wide(&info.szDevice);
                 let id = format!("DISPLAY_{}", displays.len() + 1);
@@ -224,8 +334,8 @@ impl PlatformAdapter for WindowsPlatformAdapter {
                 displays.push(DisplayInfo {
                     id,
                     name: dev_name,
-                    left: rect.left,
-                    top: rect.top,
+                    left,
+                    top,
                     width,
                     height,
                     is_primary,
@@ -305,17 +415,21 @@ impl PlatformAdapter for WindowsPlatformAdapter {
     }
 
     fn is_display_occluded_by_fullscreen(&self, display: &DisplayInfo) -> bool {
-        // SAFETY: GetForegroundWindow and GetShellWindow take no arguments and return window handles.
+        // SAFETY: GetForegroundWindow takes no arguments and returns the active foreground HWND.
         let fg_hwnd = unsafe { GetForegroundWindow() };
         if fg_hwnd.is_null() {
             return false;
         }
 
-        // Ignore desktop shell windows
-        // SAFETY: GetShellWindow returns the desktop shell window handle.
-        let shell_hwnd = unsafe { GetShellWindow() };
-        if fg_hwnd == shell_hwnd {
-            return false;
+        // Ignore desktop, shell, minimized, or invisible windows
+        // SAFETY: Standard Win32 window state queries on fg_hwnd.
+        unsafe {
+            if fg_hwnd == GetShellWindow() || fg_hwnd == GetDesktopWindow() {
+                return false;
+            }
+            if IsWindowVisible(fg_hwnd) == 0 || IsIconic(fg_hwnd) != 0 {
+                return false;
+            }
         }
 
         if let Some(workerw) = self.workerw_handle {
@@ -324,9 +438,32 @@ impl PlatformAdapter for WindowsPlatformAdapter {
             }
         }
 
-        // SAFETY: IsWindowVisible checks the visibility bit of fg_hwnd.
-        if unsafe { IsWindowVisible(fg_hwnd) } == 0 {
-            return false;
+        // Inspect window class name to ignore Explorer desktop layers, taskbars, and our own windows.
+        // Without this check, clicking on the desktop selects `Progman` or `WorkerW` (which spans
+        // the entire screen), falsely triggering full-screen pause and causing playback flicker!
+        let mut class_buf = [0u16; 256];
+        // SAFETY: GetClassNameW copies up to 256 UTF-16 code units of the window's class name.
+        let class_len =
+            unsafe { GetClassNameW(fg_hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32) };
+        if class_len > 0 {
+            let class_name = String::from_utf16_lossy(&class_buf[..class_len as usize]);
+            if matches!(
+                class_name.as_str(),
+                "Progman"
+                    | "WorkerW"
+                    | "Shell_TrayWnd"
+                    | "Shell_SecondaryTrayWnd"
+                    | "NotifyIconOverflowWindow"
+                    | "Windows.UI.Core.CoreWindow"
+                    | "XamlExplorerHostIslandWindow"
+                    | "TopLevelWindowForOverflowXamlIsland"
+                    | "MultitaskingViewFrame"
+                    | "TaskListThumbnailWnd"
+                    | "AuralisConfigStudioWindowClass"
+                    | "AuralisWallpaperHostWindowClass"
+            ) {
+                return false;
+            }
         }
 
         // SAFETY: RECT is a plain C struct safe to zero-initialize; GetWindowRect populates it.
@@ -348,23 +485,37 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         &mut self,
         display: &DisplayInfo,
     ) -> Result<isize, PlatformError> {
+        Self::ensure_dpi_awareness();
+        Self::register_wallpaper_host_class();
         let workerw = self.get_or_spawn_workerw()?;
 
-        let class_name = wide_string("STATIC");
+        let class_name = wide_string(WALLPAPER_HOST_CLASS_NAME);
         let window_title = wide_string(&format!("AuralisWallpaperHost_{}", display.id));
 
         // SAFETY: GetModuleHandleW(null) returns the base HINSTANCE of the current executable.
         let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
 
-        // SAFETY: CreateWindowExW creates a borderless tool window using the standard system "STATIC" class.
+        // Compute coordinates relative to WorkerW's origin so the child window fills 100%
+        // of the target monitor in physical pixels.
+        let mut workerw_rect: RECT = unsafe { mem::zeroed() };
+        let (rel_left, rel_top) = if unsafe { GetWindowRect(workerw, &mut workerw_rect) } != 0 {
+            (
+                display.left - workerw_rect.left,
+                display.top - workerw_rect.top,
+            )
+        } else {
+            (display.left, display.top)
+        };
+
+        // SAFETY: CreateWindowExW creates a borderless host window using our flicker-free class.
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 class_name.as_ptr(),
                 window_title.as_ptr(),
-                WS_POPUP | WS_VISIBLE,
-                display.left,
-                display.top,
+                WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                rel_left,
+                rel_top,
                 display.width as i32,
                 display.height as i32,
                 std::ptr::null_mut(),
@@ -381,21 +532,24 @@ impl PlatformAdapter for WindowsPlatformAdapter {
             )));
         }
 
-        // Attach the host window into the WorkerW layer behind desktop icons
-        // SAFETY: SetParent reparents the newly created valid hwnd into workerw.
-        unsafe { SetParent(hwnd, workerw) };
-
-        // Position the window within the WorkerW coordinate space
-        // SAFETY: SetWindowPos positions our valid hwnd without stealing focus.
+        // Attach the host window into the WorkerW layer behind desktop icons and transition
+        // its window style from WS_POPUP to WS_CHILD so the desktop compositor layers it cleanly.
+        // SAFETY: SetParent and SetWindowLongPtrW operate on our valid hwnd and workerw.
         unsafe {
+            SetParent(hwnd, workerw);
+            let cur_style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+            let child_style =
+                (cur_style & !WS_POPUP) | WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, child_style as isize);
+
             SetWindowPos(
                 hwnd,
                 std::ptr::null_mut(),
-                display.left,
-                display.top,
+                rel_left,
+                rel_top,
                 display.width as i32,
                 display.height as i32,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
             );
         }
 
@@ -497,7 +651,7 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         muted: bool,
         volume: u8,
     ) -> Result<(), PlatformError> {
-        if let Some(player) = self.players.get(&window_hwnd) {
+        if let Some(player) = self.players.get_mut(&window_hwnd) {
             player.set_audio(muted, volume)?;
         }
         Ok(())
@@ -508,7 +662,7 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         window_hwnd: isize,
         loop_playback: bool,
     ) -> Result<(), PlatformError> {
-        if let Some(player) = self.players.get(&window_hwnd) {
+        if let Some(player) = self.players.get_mut(&window_hwnd) {
             player.tick(loop_playback)?;
         }
         Ok(())
