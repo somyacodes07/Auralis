@@ -152,10 +152,11 @@ fn run_status() -> ExitCode {
 
             if let Some(metrics) = engine.process_metrics() {
                 let ram_mb = (metrics.working_set_bytes as f64) / (1024.0 * 1024.0);
+                let priv_mb = (metrics.private_bytes as f64) / (1024.0 * 1024.0);
                 let peak_mb = (metrics.peak_working_set_bytes as f64) / (1024.0 * 1024.0);
                 let cpu_sec = (metrics.cpu_time_ms as f64) / 1000.0;
                 println!(
-                    "Measured Process Metrics:  RAM {ram_mb:.2} MB (Peak {peak_mb:.2} MB), CPU {cpu_sec:.3}s"
+                    "Measured Process Metrics:  Working Set {ram_mb:.2} MB | Private {priv_mb:.2} MB (Peak {peak_mb:.2} MB), CPU {cpu_sec:.3}s"
                 );
             }
 
@@ -179,15 +180,21 @@ fn run_status() -> ExitCode {
                 engine.config.pause_on_battery
             );
             println!(
-                "  Launch at startup:       {} (OS Registry Active: {})",
+                "  Launch at startup:       {} (OS Active: {})",
                 engine.config.launch_at_startup,
                 engine.is_launch_at_startup_enabled()
+            );
+            println!(
+                "  Recent Wallpapers:       {}",
+                engine.config.recent_wallpapers.len()
             );
 
             if let Some(default_wp) = &engine.config.default_wallpaper {
                 println!(
-                    "  Configured Wallpaper:    {}",
-                    default_wp.media_path.display()
+                    "  Configured Wallpaper:    {} (Speed: {}%, Scale: {})",
+                    default_wp.media_path.display(),
+                    default_wp.speed_percent,
+                    default_wp.aspect_mode.label()
                 );
             } else {
                 println!("  Configured Wallpaper:    None");
@@ -256,7 +263,7 @@ fn run_apply(path: PathBuf, target_display: Option<&str>) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    // Preserve user audio/loop settings if already configured on this display or default
+    // Preserve user audio/loop/speed/aspect settings if already configured on this display or default
     let mut final_wp = wp_cfg;
     if let Some(existing) = config
         .per_display
@@ -266,8 +273,11 @@ fn run_apply(path: PathBuf, target_display: Option<&str>) -> ExitCode {
         final_wp.loop_playback = existing.loop_playback;
         final_wp.muted = existing.muted;
         final_wp.volume = existing.volume;
+        final_wp.speed_percent = existing.speed_percent;
+        final_wp.aspect_mode = existing.aspect_mode;
     }
 
+    config.record_recent_wallpaper(path.clone());
     config
         .per_display
         .insert(display_id.clone(), final_wp.clone());
@@ -361,6 +371,15 @@ fn run_play_for_duration(path: PathBuf, seconds: u64) -> ExitCode {
         }
         let _ = engine.tick();
         std::thread::sleep(Duration::from_millis(50));
+    }
+
+    if let Some(metrics) = engine.process_metrics() {
+        let ws_mb = (metrics.working_set_bytes as f64) / (1024.0 * 1024.0);
+        let priv_mb = (metrics.private_bytes as f64) / (1024.0 * 1024.0);
+        let cpu_sec = (metrics.cpu_time_ms as f64) / 1000.0;
+        println!(
+            "[METRICS] Steady-state during playback: Working Set {ws_mb:.2} MB | Private {priv_mb:.2} MB | CPU {cpu_sec:.3}s"
+        );
     }
 
     engine.shutdown();

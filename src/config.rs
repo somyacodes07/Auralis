@@ -12,10 +12,47 @@ use std::path::{Path, PathBuf};
 pub const SUPPORTED_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv", "webm", "m4v"];
 
 /// Current configuration schema version.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
+/// Maximum number of recent wallpaper paths stored in `AppConfig::recent_wallpapers`.
+pub const MAX_RECENT_WALLPAPERS: usize = 10;
 
 const fn default_schema_version() -> u32 {
     CURRENT_SCHEMA_VERSION
+}
+
+const fn default_speed_percent() -> u16 {
+    100
+}
+
+/// Video aspect-ratio scaling mode inside the wallpaper host window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum VideoAspectMode {
+    /// Stretch/fill the entire monitor surface (`MFP_ASPECT_RATIO_NONE`).
+    #[default]
+    Fill,
+    /// Preserve original video aspect ratio with black letterbox/pillarbox bars (`MFP_ASPECT_RATIO_PRESERVE`).
+    Fit,
+}
+
+impl VideoAspectMode {
+    /// Human-readable label for UI display.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fill => "Fill",
+            Self::Fit => "Fit",
+        }
+    }
+
+    /// Cycle between `Fill` and `Fit`.
+    #[must_use]
+    pub const fn toggle(self) -> Self {
+        match self {
+            Self::Fill => Self::Fit,
+            Self::Fit => Self::Fill,
+        }
+    }
 }
 
 /// Errors that can occur during media validation or configuration operations.
@@ -61,6 +98,12 @@ pub struct DisplayWallpaperConfig {
     pub muted: bool,
     /// Playback volume (0 to 100).
     pub volume: u8,
+    /// Playback speed percentage (`25..=200`, where `100` is `1.00x`).
+    #[serde(default = "default_speed_percent")]
+    pub speed_percent: u16,
+    /// Aspect ratio / scaling mode (`Fill` vs `Fit`).
+    #[serde(default)]
+    pub aspect_mode: VideoAspectMode,
 }
 
 impl DisplayWallpaperConfig {
@@ -72,6 +115,8 @@ impl DisplayWallpaperConfig {
             loop_playback: true,
             muted: true,
             volume: 0,
+            speed_percent: 100,
+            aspect_mode: VideoAspectMode::Fill,
         })
     }
 }
@@ -86,6 +131,9 @@ pub struct AppConfig {
     pub default_wallpaper: Option<DisplayWallpaperConfig>,
     /// Display-specific wallpaper configurations mapped by stable display identifier.
     pub per_display: HashMap<String, DisplayWallpaperConfig>,
+    /// Recently applied video wallpaper paths (newest first, up to `MAX_RECENT_WALLPAPERS`).
+    #[serde(default)]
+    pub recent_wallpapers: Vec<PathBuf>,
     /// Automatically pause playback when full-screen applications are focused.
     pub pause_on_fullscreen: bool,
     /// Automatically pause playback on battery power (laptops).
@@ -100,6 +148,7 @@ impl Default for AppConfig {
             schema_version: CURRENT_SCHEMA_VERSION,
             default_wallpaper: None,
             per_display: HashMap::new(),
+            recent_wallpapers: Vec::new(),
             pause_on_fullscreen: true,
             pause_on_battery: true,
             launch_at_startup: false,
@@ -108,6 +157,16 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// Record a validated wallpaper path at the front of `recent_wallpapers`, deduplicating
+    /// existing entries and capping the list at `MAX_RECENT_WALLPAPERS`.
+    pub fn record_recent_wallpaper(&mut self, path: PathBuf) {
+        self.recent_wallpapers.retain(|p| p != &path);
+        self.recent_wallpapers.insert(0, path);
+        if self.recent_wallpapers.len() > MAX_RECENT_WALLPAPERS {
+            self.recent_wallpapers.truncate(MAX_RECENT_WALLPAPERS);
+        }
+    }
+
     /// Return the platform-standard per-user configuration file path
     /// (e.g., `%APPDATA%\Auralis\auralis_config.json` on Windows, or
     /// `~/Library/Application Support/Auralis/auralis_config.json` on macOS).
@@ -157,7 +216,7 @@ impl AppConfig {
     }
 
     /// Normalize legacy enumeration-indexed display keys (e.g. `DISPLAY_1` -> `DISPLAY1`)
-    /// to match stable hardware device identifiers.
+    /// and clamp playback speeds to safe bounds (`25..=200`).
     pub fn migrate_legacy_keys(&mut self) {
         let keys: Vec<String> = self.per_display.keys().cloned().collect();
         for key in keys {
@@ -170,7 +229,21 @@ impl AppConfig {
                 }
             }
         }
-        if self.schema_version == 0 {
+        for cfg in self.per_display.values_mut() {
+            if cfg.speed_percent == 0 {
+                cfg.speed_percent = 100;
+            } else {
+                cfg.speed_percent = cfg.speed_percent.clamp(25, 200);
+            }
+        }
+        if let Some(default_cfg) = &mut self.default_wallpaper {
+            if default_cfg.speed_percent == 0 {
+                default_cfg.speed_percent = 100;
+            } else {
+                default_cfg.speed_percent = default_cfg.speed_percent.clamp(25, 200);
+            }
+        }
+        if self.schema_version < CURRENT_SCHEMA_VERSION {
             self.schema_version = CURRENT_SCHEMA_VERSION;
         }
     }
@@ -399,5 +472,23 @@ mod tests {
 
         // Cleanup
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_recent_wallpapers_and_aspect_mode() {
+        let mut config = AppConfig::default();
+        for i in 0..15 {
+            config.record_recent_wallpaper(PathBuf::from(format!("video_{i}.mp4")));
+        }
+        assert_eq!(config.recent_wallpapers.len(), MAX_RECENT_WALLPAPERS);
+        assert_eq!(config.recent_wallpapers[0], PathBuf::from("video_14.mp4"));
+
+        // Recording an existing path moves it to the front without duplicating
+        config.record_recent_wallpaper(PathBuf::from("video_10.mp4"));
+        assert_eq!(config.recent_wallpapers.len(), MAX_RECENT_WALLPAPERS);
+        assert_eq!(config.recent_wallpapers[0], PathBuf::from("video_10.mp4"));
+
+        assert_eq!(VideoAspectMode::Fill.toggle(), VideoAspectMode::Fit);
+        assert_eq!(VideoAspectMode::Fit.toggle(), VideoAspectMode::Fill);
     }
 }

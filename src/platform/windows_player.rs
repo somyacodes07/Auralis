@@ -3,10 +3,12 @@
 //! Wraps the native Windows Media Foundation `IMFPMediaPlayer` COM interface to decode
 //! and render hardware-accelerated video directly into a `WorkerW` wallpaper host `HWND`.
 
+use super::windows::WindowsPlatformAdapter;
 use super::PlatformError;
+use crate::config::VideoAspectMode;
 use std::ffi::c_void;
 use std::mem;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
@@ -21,6 +23,10 @@ pub const MFP_STATE_STOPPED: u32 = 1;
 pub const MFP_STATE_PLAYING: u32 = 2;
 pub const MFP_STATE_PAUSED: u32 = 3;
 pub const MFP_STATE_SHUTDOWN: u32 = 4;
+
+/// Aspect-ratio mode constants from `MFP_ASPECT_RATIO_MODE` in `mfplay.h`.
+const MFP_ASPECT_RATIO_NONE: u32 = 0;
+const MFP_ASPECT_RATIO_PRESERVE: u32 = 1;
 
 /// Variant type tag `VT_I8` (signed 64-bit integer) used for 100-nanosecond media positions.
 const VT_I8: u16 = 20;
@@ -198,12 +204,18 @@ struct ImfpMediaPlayer {
 pub struct MfVideoPlayer {
     /// Raw COM pointer stored as `usize` so the wrapper can be held inside the platform adapter.
     player_ptr: usize,
+    /// Last successfully loaded media path on this player (for zero-overlap fallback recovery).
+    current_path: Option<PathBuf>,
     /// Cached total media duration in 100-nanosecond units, if known.
     duration_100ns: Option<i64>,
     /// Desired mute state.
     muted: bool,
     /// Desired volume (`0..=100`).
     volume: u8,
+    /// Desired playback speed percentage (`25..=200`, where `100` is `1.00x`).
+    speed_percent: u16,
+    /// Desired aspect-ratio mode (`Fill` vs `Fit`).
+    aspect_mode: VideoAspectMode,
     /// Whether one-time EVR surface/aspect initialization has been applied after entering `PLAYING`.
     evr_initialized: bool,
 }
@@ -212,9 +224,12 @@ impl std::fmt::Debug for MfVideoPlayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MfVideoPlayer")
             .field("player_ptr", &format_args!("0x{:X}", self.player_ptr))
+            .field("current_path", &self.current_path)
             .field("duration_100ns", &self.duration_100ns)
             .field("muted", &self.muted)
             .field("volume", &self.volume)
+            .field("speed_percent", &self.speed_percent)
+            .field("aspect_mode", &self.aspect_mode)
             .finish()
     }
 }
@@ -284,10 +299,6 @@ impl MfVideoPlayer {
         }
 
         let create_fn = Self::load_create_fn()?;
-
-        let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let _ = abs_path;
-
         let mut player: *mut ImfpMediaPlayer = std::ptr::null_mut();
 
         // SAFETY: Creates the IMFPMediaPlayer instance bound to `window_hwnd` without starting playback yet.
@@ -311,9 +322,12 @@ impl MfVideoPlayer {
 
         let mut instance = Self {
             player_ptr: player as usize,
+            current_path: None,
             duration_100ns: None,
             muted,
             volume: volume.min(100),
+            speed_percent: 100,
+            aspect_mode: VideoAspectMode::Fill,
             evr_initialized: false,
         };
 
@@ -323,9 +337,61 @@ impl MfVideoPlayer {
 
     /// Synchronously validate and load a new video file into this existing player instance.
     ///
-    /// If `CreateMediaItemFromURL` rejects the file, the previously playing media item on this
-    /// player remains untouched and continues playing (`AGENTS.md` Principle 9).
+    /// Releases the previous media item's 4K DXVA2 decode surfaces before allocating the new
+    /// topology so two 4K surface pools never overlap in RAM (~350 MB savings), and automatically
+    /// restores the previous working wallpaper if `CreateMediaItemFromURL` rejects the replacement
+    /// (`AGENTS.md` Principle 9).
     pub fn load_and_play(
+        &mut self,
+        path: &Path,
+        muted: bool,
+        volume: u8,
+    ) -> Result<(), PlatformError> {
+        let previous_path = self.current_path.take();
+        let prev_muted = self.muted;
+        let prev_vol = self.volume;
+
+        // If a media item was already playing on this player, release its decode surface pool
+        // BEFORE allocating the new topology so two 4K surface pools never coexist in RAM.
+        let player = self.as_ptr();
+        if player.is_null() {
+            return Err(PlatformError::MediaPlaybackFailed(
+                "Media player is shut down".to_string(),
+            ));
+        }
+        if previous_path.is_some() {
+            // SAFETY: Stops active presentation and unbinds the previous media item before loading the next.
+            unsafe {
+                let _ = ((*(*player).vtbl).stop)(player);
+                let _ = ((*(*player).vtbl).clear_media_item)(player);
+            }
+            Self::pump_pending_messages();
+            WindowsPlatformAdapter::trim_process_working_set();
+        }
+
+        match self.load_media_internal(path, muted, volume) {
+            Ok(()) => {
+                self.current_path = Some(path.to_path_buf());
+                WindowsPlatformAdapter::trim_process_working_set();
+                Ok(())
+            }
+            Err(err) => {
+                // AGENTS.md Principle 9: Restore the previous working media item if the replacement failed
+                if let Some(prev) = previous_path {
+                    if self
+                        .load_media_internal(&prev, prev_muted, prev_vol)
+                        .is_ok()
+                    {
+                        self.current_path = Some(prev);
+                    }
+                }
+                WindowsPlatformAdapter::trim_process_working_set();
+                Err(err)
+            }
+        }
+    }
+
+    fn load_media_internal(
         &mut self,
         path: &Path,
         muted: bool,
@@ -348,7 +414,7 @@ impl MfVideoPlayer {
             .chain(std::iter::once(0))
             .collect();
 
-        // Load media item synchronously so invalid/corrupt files are caught before modifying state
+        // Load media item synchronously so invalid/corrupt files are caught immediately
         let mut item: *mut ImfpMediaItem = std::ptr::null_mut();
         // SAFETY: Calls CreateMediaItemFromURL with fSync = 1 (TRUE) on valid COM interface.
         let hr_item = unsafe {
@@ -412,20 +478,28 @@ impl MfVideoPlayer {
         self.player_ptr as *mut ImfpMediaPlayer
     }
 
-    /// Apply EVR full-window aspect mode (`0`), black border color, audio mute/volume,
-    /// and a single `UpdateVideo` geometry sync.
+    /// Apply EVR aspect mode (`Fill` vs `Fit`), black border color, audio mute/volume,
+    /// playback rate, and a single `UpdateVideo` geometry sync.
     fn apply_evr_and_audio_settings(&self) {
         let player = self.as_ptr();
         if player.is_null() {
             return;
         }
         let clamped_vol = (f32::from(self.volume.min(100))) / 100.0;
-        // SAFETY: Invokes EVR and audio configuration methods on valid IMFPMediaPlayer pointer.
+        let ar_flag = match self.aspect_mode {
+            VideoAspectMode::Fill => MFP_ASPECT_RATIO_NONE,
+            VideoAspectMode::Fit => MFP_ASPECT_RATIO_PRESERVE,
+        };
+        let rate = (f32::from(self.speed_percent.clamp(25, 200))) / 100.0;
+        // SAFETY: Invokes EVR, rate, and audio configuration methods on valid IMFPMediaPlayer pointer.
         unsafe {
-            let _ = ((*(*player).vtbl).set_aspect_ratio_mode)(player, 0);
+            let _ = ((*(*player).vtbl).set_aspect_ratio_mode)(player, ar_flag);
             let _ = ((*(*player).vtbl).set_border_color)(player, 0x0000_0000);
             let _ = ((*(*player).vtbl).set_mute)(player, i32::from(self.muted));
             let _ = ((*(*player).vtbl).set_volume)(player, clamped_vol);
+            if (rate - 1.0).abs() > f32::EPSILON {
+                let _ = ((*(*player).vtbl).set_rate)(player, rate);
+            }
             let _ = ((*(*player).vtbl).update_video)(player);
         }
     }
@@ -615,6 +689,40 @@ impl MfVideoPlayer {
         Ok(())
     }
 
+    /// Configure playback speed percentage (`25..=200`, where `100` is `1.00x`).
+    pub fn set_playback_rate(&mut self, speed_percent: u16) -> Result<(), PlatformError> {
+        self.speed_percent = speed_percent.clamp(25, 200);
+        let player = self.as_ptr();
+        if player.is_null() {
+            return Ok(());
+        }
+        let rate = (f32::from(self.speed_percent)) / 100.0;
+        // SAFETY: Invokes IMFPMediaPlayer::SetRate on valid COM interface pointer.
+        unsafe {
+            let _ = ((*(*player).vtbl).set_rate)(player, rate);
+        }
+        Ok(())
+    }
+
+    /// Configure video aspect-ratio scaling mode (`Fill` vs `Fit`) and sync EVR geometry.
+    pub fn set_aspect_mode(&mut self, aspect_mode: VideoAspectMode) -> Result<(), PlatformError> {
+        self.aspect_mode = aspect_mode;
+        let player = self.as_ptr();
+        if player.is_null() {
+            return Ok(());
+        }
+        let ar_flag = match aspect_mode {
+            VideoAspectMode::Fill => MFP_ASPECT_RATIO_NONE,
+            VideoAspectMode::Fit => MFP_ASPECT_RATIO_PRESERVE,
+        };
+        // SAFETY: Invokes SetAspectRatioMode and UpdateVideo on valid COM interface pointer.
+        unsafe {
+            let _ = ((*(*player).vtbl).set_aspect_ratio_mode)(player, ar_flag);
+            let _ = ((*(*player).vtbl).update_video)(player);
+        }
+        Ok(())
+    }
+
     /// Query the current `MFP_MEDIAPLAYER_STATE` (`0..=4`).
     pub fn state(&self) -> Result<u32, PlatformError> {
         let player = self.as_ptr();
@@ -646,6 +754,8 @@ impl MfVideoPlayer {
             if !self.evr_initialized {
                 self.apply_evr_and_audio_settings();
                 self.evr_initialized = true;
+                // Reclaim one-time Media Foundation topology staging buffers once EVR is active
+                WindowsPlatformAdapter::trim_process_working_set();
             }
 
             if !loop_playback {
@@ -675,17 +785,20 @@ impl MfVideoPlayer {
         Ok(())
     }
 
-    /// Explicitly shut down the Media Foundation session and release the COM object.
+    /// Explicitly shut down the Media Foundation session, release COM objects, and reclaim pages.
     pub fn shutdown(&mut self) {
         let player = self.as_ptr();
         if !player.is_null() {
-            // SAFETY: Stops playback, shuts down the MFPlay session, and releases the COM reference.
+            // SAFETY: Stops playback, clears media item, shuts down the MFPlay session, and releases the COM reference.
             unsafe {
                 let _ = ((*(*player).vtbl).stop)(player);
+                let _ = ((*(*player).vtbl).clear_media_item)(player);
                 let _ = ((*(*player).vtbl).shutdown)(player);
                 ((*(*player).vtbl).release)(player);
             }
             self.player_ptr = 0;
+            self.current_path = None;
+            WindowsPlatformAdapter::trim_process_working_set();
         }
     }
 }

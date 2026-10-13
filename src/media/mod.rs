@@ -3,7 +3,7 @@
 //! Provides resilient playback orchestration, volume/mute management, and error preservation
 //! adhering to AGENTS.md principle 9 (preserve working wallpaper when replacement fails).
 
-use crate::config::{validate_media_file, ConfigError};
+use crate::config::{validate_media_file, ConfigError, VideoAspectMode};
 use std::path::PathBuf;
 
 /// Status of the video playback pipeline.
@@ -23,7 +23,7 @@ pub enum PlaybackState {
     Failed { path: PathBuf, error: String },
 }
 
-/// Controller managing media playback lifecycle and audio parameters.
+/// Controller managing media playback lifecycle and audio/render parameters.
 #[derive(Debug, Clone)]
 pub struct MediaController {
     /// Current state of the player.
@@ -36,6 +36,10 @@ pub struct MediaController {
     pub muted: bool,
     /// Playback volume (clamped 0 to 100).
     pub volume: u8,
+    /// Playback speed percentage (`25..=200`, where `100` is `1.00x`).
+    pub speed_percent: u16,
+    /// Video aspect-ratio scaling mode (`Fill` vs `Fit`).
+    pub aspect_mode: VideoAspectMode,
 }
 
 impl Default for MediaController {
@@ -45,7 +49,7 @@ impl Default for MediaController {
 }
 
 impl MediaController {
-    /// Create a new media controller with safe initial defaults (muted, looping).
+    /// Create a new media controller with safe initial defaults (muted, looping, 1.0x speed, Fill).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -54,6 +58,8 @@ impl MediaController {
             loop_playback: true,
             muted: true,
             volume: 0,
+            speed_percent: 100,
+            aspect_mode: VideoAspectMode::Fill,
         }
     }
 
@@ -127,6 +133,16 @@ impl MediaController {
     /// Set looping preference.
     pub fn set_loop(&mut self, loop_playback: bool) {
         self.loop_playback = loop_playback;
+    }
+
+    /// Set playback speed percentage (clamped between 25% and 200%).
+    pub fn set_speed_percent(&mut self, speed_percent: u16) {
+        self.speed_percent = speed_percent.clamp(25, 200);
+    }
+
+    /// Set video aspect-ratio scaling mode (`Fill` vs `Fit`).
+    pub fn set_aspect_mode(&mut self, aspect_mode: VideoAspectMode) {
+        self.aspect_mode = aspect_mode;
     }
 
     /// Attempt to recover from a failure by reverting to the last known working media.

@@ -11,7 +11,7 @@
 
 use super::windows::{string_from_wide, wide_string, WindowsPlatformAdapter};
 use super::windows_player::MfVideoPlayer;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, VideoAspectMode};
 use crate::engine::WallpaperEngine;
 use crate::media::PlaybackState;
 use crate::platform::{create_platform_adapter, PowerStatus};
@@ -76,6 +76,10 @@ const ID_BTN_QUIT: usize = 113;
 const ID_CHK_STARTUP: usize = 114;
 const ID_BTN_PREVIEW: usize = 115;
 const ID_BTN_STOP_PREVIEW: usize = 116;
+const ID_BTN_SPEED_DOWN: usize = 117;
+const ID_BTN_SPEED_UP: usize = 118;
+const ID_BTN_ASPECT: usize = 119;
+const ID_BTN_NEXT_RECENT: usize = 120;
 
 const TRAY_ICON_ID: u32 = 1;
 const IDM_TRAY_OPEN: usize = 2001;
@@ -83,6 +87,7 @@ const IDM_TRAY_PAUSE_RESUME: usize = 2002;
 const IDM_TRAY_MUTE_UNMUTE: usize = 2003;
 const IDM_TRAY_STOP: usize = 2004;
 const IDM_TRAY_QUIT: usize = 2005;
+const IDM_TRAY_NEXT_RECENT: usize = 2006;
 
 const ID_TIMER_TICK: usize = 1;
 /// 100ms tick interval ensures pre-EOS seamless loop seeking and responsive policy updates.
@@ -100,6 +105,8 @@ struct GuiState {
     chk_mute: HWND,
     chk_loop: HWND,
     lbl_volume: HWND,
+    lbl_speed: HWND,
+    btn_aspect: HWND,
     chk_fullscreen: HWND,
     chk_battery: HWND,
     chk_startup: HWND,
@@ -110,6 +117,7 @@ struct GuiState {
     last_error: Option<String>,
     last_status_text: String,
     tray_added: bool,
+    tick_counter: u32,
 }
 
 thread_local! {
@@ -222,6 +230,7 @@ pub fn run_windows_gui(
     } else {
         engine.restore_saved_wallpapers();
     }
+    engine.trim_working_set();
 
     let (dpi, scale) = query_dpi_scale();
     let font_height = -((10 * dpi) / 72);
@@ -257,6 +266,8 @@ pub fn run_windows_gui(
                 chk_mute: std::ptr::null_mut(),
                 chk_loop: std::ptr::null_mut(),
                 lbl_volume: std::ptr::null_mut(),
+                lbl_speed: std::ptr::null_mut(),
+                btn_aspect: std::ptr::null_mut(),
                 chk_fullscreen: std::ptr::null_mut(),
                 chk_battery: std::ptr::null_mut(),
                 chk_startup: std::ptr::null_mut(),
@@ -267,6 +278,7 @@ pub fn run_windows_gui(
                 last_error: load_warning,
                 last_status_text: String::new(),
                 tray_added: false,
+                tick_counter: 0,
             });
         }
     });
@@ -316,7 +328,7 @@ pub fn run_windows_gui(
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             scale_px(920, scale),
-            scale_px(535, scale),
+            scale_px(565, scale),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             hinstance,
@@ -411,6 +423,7 @@ fn show_tray_context_menu(hwnd: HWND) {
 
     let lbl_open = wide_string("Open Auralis Studio");
     let lbl_pause = wide_string("Pause / Resume Wallpaper");
+    let lbl_next = wide_string("Next Recent Wallpaper");
     let lbl_mute = wide_string("Mute / Unmute Audio");
     let lbl_stop = wide_string("Stop Wallpaper");
     let lbl_quit = wide_string("Quit Auralis && Restore Desktop");
@@ -420,6 +433,7 @@ fn show_tray_context_menu(hwnd: HWND) {
         AppendMenuW(hmenu, MF_STRING, IDM_TRAY_OPEN, lbl_open.as_ptr());
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(hmenu, MF_STRING, IDM_TRAY_PAUSE_RESUME, lbl_pause.as_ptr());
+        AppendMenuW(hmenu, MF_STRING, IDM_TRAY_NEXT_RECENT, lbl_next.as_ptr());
         AppendMenuW(hmenu, MF_STRING, IDM_TRAY_MUTE_UNMUTE, lbl_mute.as_ptr());
         AppendMenuW(hmenu, MF_STRING, IDM_TRAY_STOP, lbl_stop.as_ptr());
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
@@ -459,6 +473,9 @@ fn show_tray_context_menu(hwnd: HWND) {
         }
         IDM_TRAY_PAUSE_RESUME => {
             handle_command(hwnd, ID_BTN_PAUSE_RESUME, 0);
+        }
+        IDM_TRAY_NEXT_RECENT => {
+            handle_command(hwnd, ID_BTN_NEXT_RECENT, 0);
         }
         IDM_TRAY_MUTE_UNMUTE => {
             GUI_STATE.with(|cell| {
@@ -525,6 +542,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_AURALIS_RELOAD_CONFIG => {
+            stop_in_app_preview();
             GUI_STATE.with(|cell| {
                 if let Ok(mut guard) = cell.try_borrow_mut() {
                     if let Some(state) = guard.as_mut() {
@@ -532,6 +550,7 @@ unsafe extern "system" fn window_proc(
                         state.engine.config = new_cfg;
                         state.last_error = warn;
                         state.engine.restore_saved_wallpapers();
+                        state.engine.trim_working_set();
                     }
                 }
             });
@@ -640,6 +659,12 @@ unsafe extern "system" fn window_proc(
                             if let Some(preview) = &mut state.preview_player {
                                 let _ = preview.tick(true);
                             }
+                            state.tick_counter = state.tick_counter.wrapping_add(1);
+                            if state.tick_counter.is_multiple_of(50)
+                                && state.preview_player.is_none()
+                            {
+                                state.engine.trim_working_set();
+                            }
                             return true;
                         }
                     }
@@ -672,6 +697,7 @@ unsafe extern "system" fn window_proc(
             if has_active {
                 // SAFETY: Hides hwnd while keeping the Win32 message loop, tray icon, and wallpaper running.
                 unsafe { ShowWindow(hwnd, SW_HIDE) };
+                WindowsPlatformAdapter::trim_process_working_set();
             } else {
                 // SAFETY: Destroys hwnd and triggers WM_DESTROY to exit the application.
                 unsafe { DestroyWindow(hwnd) };
@@ -804,7 +830,7 @@ fn create_child_controls(parent: HWND) {
         WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
         140,
         80,
-        310,
+        228,
         28,
         ID_EDT_PATH,
     );
@@ -812,11 +838,21 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Browse Video...",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        460,
+        374,
         79,
-        120,
+        112,
         30,
         ID_BTN_BROWSE,
+    );
+    mk_ctrl(
+        "BUTTON",
+        "Next Recent",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        492,
+        79,
+        88,
+        30,
+        ID_BTN_NEXT_RECENT,
     );
 
     // Note: Double ampersand `&&` escapes Win32 accelerator prefix on BUTTON controls so `&` displays literally.
@@ -825,9 +861,9 @@ fn create_child_controls(parent: HWND) {
         "Apply && Play Wallpaper",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         20,
-        122,
+        120,
         195,
-        36,
+        34,
         ID_BTN_APPLY,
     );
     mk_ctrl(
@@ -835,9 +871,9 @@ fn create_child_controls(parent: HWND) {
         "Pause / Resume",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         225,
-        122,
+        120,
         170,
-        36,
+        34,
         ID_BTN_PAUSE_RESUME,
     );
     mk_ctrl(
@@ -845,9 +881,9 @@ fn create_child_controls(parent: HWND) {
         "Stop && Clear",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         405,
-        122,
+        120,
         175,
-        36,
+        34,
         ID_BTN_STOP,
     );
 
@@ -856,7 +892,7 @@ fn create_child_controls(parent: HWND) {
         "Mute Audio",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         20,
-        172,
+        166,
         125,
         26,
         ID_CHK_MUTE,
@@ -866,7 +902,7 @@ fn create_child_controls(parent: HWND) {
         "Seamless Loop",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         155,
-        172,
+        166,
         140,
         26,
         ID_CHK_LOOP,
@@ -876,21 +912,53 @@ fn create_child_controls(parent: HWND) {
         "Vol -",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         310,
-        170,
+        164,
         65,
         28,
         ID_BTN_VOL_DOWN,
     );
-    let lbl_volume = mk_ctrl("STATIC", "Volume: 0%", SS_NOPREFIX, 385, 175, 115, 24, 0);
+    let lbl_volume = mk_ctrl("STATIC", "Volume: 0%", SS_NOPREFIX, 385, 169, 115, 24, 0);
     mk_ctrl(
         "BUTTON",
         "Vol +",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         515,
-        170,
+        164,
         65,
         28,
         ID_BTN_VOL_UP,
+    );
+
+    mk_ctrl(
+        "BUTTON",
+        "Speed -",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        20,
+        198,
+        75,
+        28,
+        ID_BTN_SPEED_DOWN,
+    );
+    let lbl_speed = mk_ctrl("STATIC", "Speed: 1.00x", SS_NOPREFIX, 105, 203, 115, 24, 0);
+    mk_ctrl(
+        "BUTTON",
+        "Speed +",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        225,
+        198,
+        75,
+        28,
+        ID_BTN_SPEED_UP,
+    );
+    let btn_aspect = mk_ctrl(
+        "BUTTON",
+        "Scale: Fill (Full Screen)",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        310,
+        198,
+        270,
+        28,
+        ID_BTN_ASPECT,
     );
 
     let chk_fullscreen = mk_ctrl(
@@ -898,7 +966,7 @@ fn create_child_controls(parent: HWND) {
         "Pause wallpaper when a Full-Screen App or Game is active",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         20,
-        206,
+        234,
         560,
         24,
         ID_CHK_FULLSCREEN,
@@ -908,7 +976,7 @@ fn create_child_controls(parent: HWND) {
         "Pause wallpaper on Battery Power / Battery Saver",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         20,
-        234,
+        260,
         560,
         24,
         ID_CHK_BATTERY,
@@ -918,7 +986,7 @@ fn create_child_controls(parent: HWND) {
         "Launch Auralis in System Tray when Windows starts (HKCU\\...\\Run)",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         20,
-        262,
+        286,
         560,
         24,
         ID_CHK_STARTUP,
@@ -971,9 +1039,9 @@ fn create_child_controls(parent: HWND) {
         "Initializing engine telemetry...",
         WS_BORDER | SS_NOPREFIX,
         20,
-        298,
+        318,
         860,
-        118,
+        124,
         0,
     );
 
@@ -982,7 +1050,7 @@ fn create_child_controls(parent: HWND) {
         "Minimize to System Tray (Keep Playing)",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         20,
-        430,
+        454,
         415,
         36,
         ID_BTN_HIDE,
@@ -992,7 +1060,7 @@ fn create_child_controls(parent: HWND) {
         "Quit Auralis && Restore Desktop",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         465,
-        430,
+        454,
         415,
         36,
         ID_BTN_QUIT,
@@ -1007,6 +1075,8 @@ fn create_child_controls(parent: HWND) {
                 state.chk_mute = chk_mute;
                 state.chk_loop = chk_loop;
                 state.lbl_volume = lbl_volume;
+                state.lbl_speed = lbl_speed;
+                state.btn_aspect = btn_aspect;
                 state.chk_fullscreen = chk_fullscreen;
                 state.chk_battery = chk_battery;
                 state.chk_startup = chk_startup;
@@ -1083,6 +1153,7 @@ fn stop_in_app_preview() {
     });
     if let Some(mut preview) = old_preview {
         preview.shutdown();
+        WindowsPlatformAdapter::trim_process_working_set();
     }
 }
 
@@ -1105,6 +1176,8 @@ fn sync_controls_from_state() {
         chk_mute: HWND,
         chk_loop: HWND,
         lbl_volume: HWND,
+        lbl_speed: HWND,
+        btn_aspect: HWND,
         chk_fullscreen: HWND,
         chk_battery: HWND,
         chk_startup: HWND,
@@ -1112,6 +1185,8 @@ fn sync_controls_from_state() {
         muted: bool,
         loop_playback: bool,
         volume: u8,
+        speed_percent: u16,
+        aspect_mode: VideoAspectMode,
         pause_on_fullscreen: bool,
         pause_on_battery: bool,
         launch_at_startup: bool,
@@ -1131,17 +1206,27 @@ fn sync_controls_from_state() {
             .or(state.engine.config.default_wallpaper.as_ref())
             .map(|cfg| cfg.media_path.to_string_lossy().to_string());
 
-        let (muted, loop_playback, volume) = state
+        let (muted, loop_playback, volume, speed_percent, aspect_mode) = state
             .engine
             .controller(&display_id)
-            .map(|c| (c.muted, c.loop_playback, c.volume))
-            .unwrap_or((true, true, 0));
+            .map(|c| {
+                (
+                    c.muted,
+                    c.loop_playback,
+                    c.volume,
+                    c.speed_percent,
+                    c.aspect_mode,
+                )
+            })
+            .unwrap_or((true, true, 0, 100, VideoAspectMode::Fill));
 
         Some(ControlSnapshot {
             edt_path: state.edt_path,
             chk_mute: state.chk_mute,
             chk_loop: state.chk_loop,
             lbl_volume: state.lbl_volume,
+            lbl_speed: state.lbl_speed,
+            btn_aspect: state.btn_aspect,
             chk_fullscreen: state.chk_fullscreen,
             chk_battery: state.chk_battery,
             chk_startup: state.chk_startup,
@@ -1149,6 +1234,8 @@ fn sync_controls_from_state() {
             muted,
             loop_playback,
             volume,
+            speed_percent,
+            aspect_mode,
             pause_on_fullscreen: state.engine.config.pause_on_fullscreen,
             pause_on_battery: state.engine.config.pause_on_battery,
             launch_at_startup: state.engine.config.launch_at_startup,
@@ -1170,7 +1257,7 @@ fn sync_controls_from_state() {
         }
     }
 
-    // SAFETY: Updates checkbox states and volume label text on valid child control handles.
+    // SAFETY: Updates checkbox states and volume/speed/aspect label text on valid child control handles.
     unsafe {
         SendMessageW(
             snap.chk_mute,
@@ -1225,6 +1312,16 @@ fn sync_controls_from_state() {
 
         let vol_txt = wide_string(&format!("Volume: {}%", snap.volume));
         SetWindowTextW(snap.lbl_volume, vol_txt.as_ptr());
+
+        if !snap.lbl_speed.is_null() {
+            let rate = f32::from(snap.speed_percent) / 100.0;
+            let spd_txt = wide_string(&format!("Speed: {rate:.2}x"));
+            SetWindowTextW(snap.lbl_speed, spd_txt.as_ptr());
+        }
+        if !snap.btn_aspect.is_null() {
+            let asp_txt = wide_string(&format!("Scale: {}", snap.aspect_mode.label()));
+            SetWindowTextW(snap.btn_aspect, asp_txt.as_ptr());
+        }
     }
 }
 
@@ -1299,6 +1396,27 @@ fn handle_command(hwnd: HWND, control_id: usize, notify_code: usize) {
                 update_status_readout();
             }
         }
+        ID_BTN_NEXT_RECENT => {
+            stop_in_app_preview();
+            GUI_STATE.with(|cell| {
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        let display_id = selected_display_id(state);
+                        match state.engine.cycle_next_recent_wallpaper(&display_id) {
+                            Ok(_) => {
+                                state.last_error = None;
+                                let _ = state.engine.config.save_to_file(&state.config_path);
+                            }
+                            Err(e) => {
+                                state.last_error = Some(e);
+                            }
+                        }
+                    }
+                }
+            });
+            sync_controls_from_state();
+            update_status_readout();
+        }
         ID_BTN_PREVIEW => {
             let path_opt = GUI_STATE.with(|cell| {
                 cell.try_borrow().ok().and_then(|g| {
@@ -1331,6 +1449,9 @@ fn handle_command(hwnd: HWND, control_id: usize, notify_code: usize) {
             update_status_readout();
         }
         ID_BTN_APPLY => {
+            // Stop the in-app preview player first so two 4K hardware decoders never run
+            // simultaneously in RAM (~350 MB working-set reduction when applying 4K video).
+            stop_in_app_preview();
             GUI_STATE.with(|cell| {
                 if let Ok(mut guard) = cell.try_borrow_mut() {
                     if let Some(state) = guard.as_mut() {
@@ -1393,6 +1514,7 @@ fn handle_command(hwnd: HWND, control_id: usize, notify_code: usize) {
                     }
                 }
             });
+            WindowsPlatformAdapter::trim_process_working_set();
             update_status_readout();
         }
         ID_CHK_MUTE | ID_BTN_VOL_DOWN | ID_BTN_VOL_UP => {
@@ -1418,6 +1540,66 @@ fn handle_command(hwnd: HWND, control_id: usize, notify_code: usize) {
                             .engine
                             .set_display_audio(&display_id, new_mute, new_vol);
                         let _ = state.engine.config.save_to_file(&state.config_path);
+                    }
+                }
+            });
+            sync_controls_from_state();
+            update_status_readout();
+        }
+        ID_BTN_SPEED_DOWN | ID_BTN_SPEED_UP => {
+            GUI_STATE.with(|cell| {
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        let display_id = selected_display_id(state);
+                        let cur_speed = state
+                            .engine
+                            .controller(&display_id)
+                            .map_or(100, |c| c.speed_percent);
+                        let new_speed = if control_id == ID_BTN_SPEED_DOWN {
+                            cur_speed.saturating_sub(25).max(25)
+                        } else {
+                            (cur_speed + 25).min(200)
+                        };
+                        match state
+                            .engine
+                            .set_display_playback_speed(&display_id, new_speed)
+                        {
+                            Ok(()) => {
+                                state.last_error = None;
+                                let _ = state.engine.config.save_to_file(&state.config_path);
+                            }
+                            Err(e) => {
+                                state.last_error = Some(e.to_string());
+                            }
+                        }
+                    }
+                }
+            });
+            sync_controls_from_state();
+            update_status_readout();
+        }
+        ID_BTN_ASPECT => {
+            GUI_STATE.with(|cell| {
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        let display_id = selected_display_id(state);
+                        let cur_aspect = state
+                            .engine
+                            .controller(&display_id)
+                            .map_or(VideoAspectMode::Fill, |c| c.aspect_mode);
+                        let next_aspect = cur_aspect.toggle();
+                        match state
+                            .engine
+                            .set_display_aspect_mode(&display_id, next_aspect)
+                        {
+                            Ok(()) => {
+                                state.last_error = None;
+                                let _ = state.engine.config.save_to_file(&state.config_path);
+                            }
+                            Err(e) => {
+                                state.last_error = Some(e.to_string());
+                            }
+                        }
                     }
                 }
             });
@@ -1488,6 +1670,7 @@ fn handle_command(hwnd: HWND, control_id: usize, notify_code: usize) {
             stop_in_app_preview();
             // SAFETY: Hides the main configuration window to the system tray while keeping playback active.
             unsafe { ShowWindow(hwnd, SW_HIDE) };
+            WindowsPlatformAdapter::trim_process_working_set();
         }
         ID_BTN_QUIT => {
             stop_in_app_preview();
@@ -1562,9 +1745,10 @@ fn update_status_readout() {
         };
 
         let perf_desc = if let Some(metrics) = state.engine.process_metrics() {
-            let ram_mb = (metrics.working_set_bytes as f64) / (1024.0 * 1024.0);
+            let ws_mb = (metrics.working_set_bytes as f64) / (1024.0 * 1024.0);
+            let priv_mb = (metrics.private_bytes as f64) / (1024.0 * 1024.0);
             let cpu_sec = (metrics.cpu_time_ms as f64) / 1000.0;
-            format!("RAM: {ram_mb:.1} MB | CPU Time: {cpu_sec:.2}s")
+            format!("Working Set: {ws_mb:.1} MB | Private: {priv_mb:.1} MB | CPU Time: {cpu_sec:.2}s")
         } else {
             "RAM: N/A".to_string()
         };
@@ -1579,19 +1763,22 @@ fn update_status_readout() {
             "Preview Idle".to_string()
         };
 
+        let recent_count = state.engine.config.recent_wallpapers.len();
         let tray_hint = if state.tray_added {
-            "System Tray Icon Active (Right-click tray icon for quick controls)."
+            format!(
+                "System Tray Active | Recent Wallpapers: {recent_count} (Click 'Next Recent' or use Tray menu to cycle)."
+            )
         } else {
-            "Closing or hiding this window keeps your active wallpaper playing."
+            format!("Recent Wallpapers: {recent_count} | Closing window keeps wallpaper playing.")
         };
 
         let status_line = if let Some(err) = &state.last_error {
             format!(
-                "Status: {state_desc}\r\nLayering: {hwnd_desc} | {video_meta} | {preview_desc}\r\nPower: {power_desc} | Measured Resource Usage: {perf_desc}\r\nNotice: {err}"
+                "Status: {state_desc}\r\nLayering: {hwnd_desc} | {video_meta} | {preview_desc}\r\nPower: {power_desc} | {perf_desc}\r\nNotice: {err}"
             )
         } else {
             format!(
-                "Status: {state_desc}\r\nLayering: {hwnd_desc} | {video_meta} | {preview_desc}\r\nPower: {power_desc} | Measured Resource Usage: {perf_desc}\r\nTip: {tray_hint}"
+                "Status: {state_desc}\r\nLayering: {hwnd_desc} | {video_meta} | {preview_desc}\r\nPower: {power_desc} | {perf_desc}\r\nTip: {tray_hint}"
             )
         };
 

@@ -3,9 +3,12 @@
 //! Provides typed separation between shared orchestration logic and native OS wallpaper layers.
 //! Shared code does not depend on AppKit, Objective-C, or Windows-specific raw pointers.
 
+use crate::config::VideoAspectMode;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 #[cfg(target_os = "windows")]
@@ -70,8 +73,10 @@ pub struct VideoPlaybackTelemetry {
 /// Measured runtime resource usage of the current Auralis process (`AGENTS.md` Principle 7).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ProcessResourceMetrics {
-    /// Current physical RAM working set in bytes.
+    /// Current physical RAM working set in bytes (`WorkingSetSize`).
     pub working_set_bytes: u64,
+    /// Current private committed RAM in bytes (`PagefileUsage` / private memory).
+    pub private_bytes: u64,
     /// Peak physical RAM working set in bytes.
     pub peak_working_set_bytes: u64,
     /// Cumulative process CPU time (kernel + user) in milliseconds.
@@ -209,6 +214,24 @@ pub trait PlatformAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Update video playback speed percentage (`25..=200`, where `100` is `1.00x`).
+    fn set_video_playback_rate(
+        &mut self,
+        _window_hwnd: isize,
+        _speed_percent: u16,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    /// Update video aspect-ratio scaling mode (`Fill` vs `Fit`) on the specified host window.
+    fn set_video_aspect_mode(
+        &mut self,
+        _window_hwnd: isize,
+        _aspect_mode: VideoAspectMode,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
     /// Periodic playback tick to handle seamless looping and video surface updates.
     fn tick_video_playback(
         &mut self,
@@ -217,6 +240,10 @@ pub trait PlatformAdapter: Send + Sync {
     ) -> Result<(), PlatformError> {
         Ok(())
     }
+
+    /// Reclaim unused OS staging pages from the process working set after topology creation
+    /// or when minimizing to the system tray.
+    fn trim_working_set(&self) {}
 
     /// Query live hardware video playback telemetry (native resolution, position, duration)
     /// for the specified host window handle.
@@ -247,17 +274,21 @@ pub fn create_platform_adapter() -> Box<dyn PlatformAdapter> {
     {
         Box::new(windows::WindowsPlatformAdapter::new())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(macos::MacOsPlatformAdapter::new())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         Box::new(FallbackPlatformAdapter)
     }
 }
 
-/// Fallback adapter for non-Windows / unverified platforms.
-#[cfg(not(target_os = "windows"))]
+/// Fallback adapter for non-Windows / non-macOS platforms.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 struct FallbackPlatformAdapter;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 impl PlatformAdapter for FallbackPlatformAdapter {
     fn enumerate_displays(&self) -> Result<Vec<DisplayInfo>, PlatformError> {
         Err(PlatformError::UnsupportedPlatform)
@@ -337,7 +368,16 @@ mod tests {
         let displays = adapter.enumerate_displays();
         #[cfg(target_os = "windows")]
         assert!(displays.is_ok());
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS with a screen or virtual display, enumeration succeeds; in headless CI without
+            // WindowServer it returns DisplayEnumerationFailed.
+            assert!(
+                displays.is_ok()
+                    || matches!(displays, Err(PlatformError::DisplayEnumerationFailed(_)))
+            );
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         assert_eq!(displays, Err(PlatformError::UnsupportedPlatform));
 
         let power = adapter.query_power_status();

@@ -5,6 +5,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.2.0-beta.1] - 2026-10-13
+
+### Added
+- **4K Video Memory Optimization & Working-Set Trimming (`src/platform/windows_player.rs`, `src/platform/windows.rs`, `src/platform/windows_gui.rs`)**:
+  - **Zero-Overlap 4K Topology Switching**: `MfVideoPlayer::load_and_play` now stops and clears the existing Media Foundation media item (`Stop` + `ClearMediaItem` + STA message pump + `K32EmptyWorkingSet`) *before* allocating the new video's DXVA2/EVR surface pool, while automatically restoring the previous working wallpaper if the replacement media fails to load (`AGENTS.md` Principle 9).
+  - **Automatic In-App Preview Teardown on Apply**: Clicking `Apply & Play Wallpaper` (or `Next Recent`) automatically shuts down the in-app preview decoder so two 4K hardware decoders never run simultaneously in RAM (eliminating the ~650–700 MB dual-decoder footprint).
+  - **Cold Staging Page Reclamation (`K32EmptyWorkingSet`)**: Reclaims cold Media Foundation topology-building staging buffers and codec DLL pages immediately after media load, after first-frame EVR initialization, on window hide/minimize to system tray, and periodically during idle background playback.
+  - **Expanded Process Memory Telemetry**: Reports both OS **Working Set** (`WorkingSetSize`) and **Private Bytes** (`PagefileUsage`) in `auralis status` and the live Studio telemetry readout.
+- **Live Playback Speed & Aspect Ratio Scaling Controls (`src/config.rs`, `src/engine.rs`, `src/platform/windows_player.rs`, `src/platform/windows_gui.rs`)**:
+  - Live hardware playback speed adjustment (`0.25x` to `2.00x` in `0.25x` steps via `IMFPMediaPlayer::SetRate`) with persistence per display.
+  - Aspect ratio scaling toggle between **Fill (Stretch to Full Screen)** (`MFP_ASPECT_RATIO_NONE`) and **Fit (Preserve Aspect Ratio / Letterbox)** (`MFP_ASPECT_RATIO_PRESERVE_ASPECT_RATIO`) with immediate `UpdateVideo()` repaint.
+- **Recent Wallpapers History & One-Click Cycling (`src/config.rs`, `src/engine.rs`, `src/platform/windows_gui.rs`)**:
+  - Persists up to 10 recently validated and applied wallpapers in `AppConfig::recent_wallpapers` (Schema v2, backward-compatible with v1 configs).
+  - Added **Next Recent** button in the Studio UI and **Next Recent Wallpaper** in the System Tray context menu to cycle through recent wallpapers with one click.
+- **Native macOS Platform Adapter (`src/platform/macos.rs`)**:
+  - Native `CoreGraphics` display enumeration (`CGGetActiveDisplayList`, `CGDisplayBounds`, `CGMainDisplayID`, `CGDisplayPixelsWide`, `CGDisplayPixelsHigh`).
+  - Native macOS battery and AC power telemetry (`pmset -g batt`), process memory/CPU metrics (`ps`), and LaunchAgent login startup management (`~/Library/LaunchAgents/com.auralis.wallpaper.plist`).
+
+### Fixed
+- Eliminated `RefCell` borrow re-entrancy crashes in `src/platform/windows_gui.rs` when clicking `Apply & Play Wallpaper` or changing wallpapers while the `WM_TIMER` loop or Media Foundation `SetMediaItem` inner message pump is active.
+
 ## [0.1.0-beta.1] - 2026-10-13
 
 ### Added

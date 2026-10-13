@@ -1,6 +1,6 @@
 [package]
 name = "auralis"
-version = "0.1.0-beta.1"
+version = "0.2.0-beta.1"
 edition = "2021"
 authors = ["somyacodes07 <ffsomyajeet@gmail.com>"]
 description = "A premium, Rust-first live wallpaper application for macOS and Windows"

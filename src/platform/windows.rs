@@ -10,6 +10,7 @@ use super::{
     DisplayInfo, PlatformAdapter, PlatformError, PowerStatus, ProcessResourceMetrics,
     VideoPlaybackTelemetry,
 };
+use crate::config::VideoAspectMode;
 use std::collections::HashMap;
 use std::mem;
 use std::path::Path;
@@ -21,7 +22,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
-use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+use windows_sys::Win32::System::ProcessStatus::{
+    K32EmptyWorkingSet, K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+};
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
     HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
@@ -78,6 +81,20 @@ impl WindowsPlatformAdapter {
         Self {
             workerw_handle: None,
             players: HashMap::new(),
+        }
+    }
+
+    /// Reclaim unused OS staging pages from the current process's working set (`K32EmptyWorkingSet`).
+    ///
+    /// During `CreateMediaItemFromURL` and `SetMediaItem`, Media Foundation maps ~180-240 MB of
+    /// temporary topology-building buffers and codec DLL pages into `WorkingSetSize`. Trimming the
+    /// working set after topology binding completes returns those cold staging pages to Windows
+    /// without affecting active hardware DXVA2 decoding or EVR presentation.
+    pub fn trim_process_working_set() {
+        // SAFETY: GetCurrentProcess returns a pseudo-handle to the current process, and
+        // K32EmptyWorkingSet instructs the OS memory manager to trim unused working set pages.
+        unsafe {
+            let _ = K32EmptyWorkingSet(GetCurrentProcess());
         }
     }
 
@@ -754,6 +771,28 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         Ok(())
     }
 
+    fn set_video_playback_rate(
+        &mut self,
+        window_hwnd: isize,
+        speed_percent: u16,
+    ) -> Result<(), PlatformError> {
+        if let Some(player) = self.players.get_mut(&window_hwnd) {
+            player.set_playback_rate(speed_percent)?;
+        }
+        Ok(())
+    }
+
+    fn set_video_aspect_mode(
+        &mut self,
+        window_hwnd: isize,
+        aspect_mode: VideoAspectMode,
+    ) -> Result<(), PlatformError> {
+        if let Some(player) = self.players.get_mut(&window_hwnd) {
+            player.set_aspect_mode(aspect_mode)?;
+        }
+        Ok(())
+    }
+
     fn tick_video_playback(
         &mut self,
         window_hwnd: isize,
@@ -763,6 +802,10 @@ impl PlatformAdapter for WindowsPlatformAdapter {
             player.tick(loop_playback)?;
         }
         Ok(())
+    }
+
+    fn trim_working_set(&self) {
+        Self::trim_process_working_set();
     }
 
     fn query_video_telemetry(&self, window_hwnd: isize) -> Option<VideoPlaybackTelemetry> {
@@ -830,6 +873,7 @@ impl PlatformAdapter for WindowsPlatformAdapter {
 
         Some(ProcessResourceMetrics {
             working_set_bytes: mem_counters.WorkingSetSize as u64,
+            private_bytes: mem_counters.PagefileUsage as u64,
             peak_working_set_bytes: mem_counters.PeakWorkingSetSize as u64,
             cpu_time_ms,
         })

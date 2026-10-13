@@ -15,7 +15,9 @@ pub mod engine;
 pub mod media;
 pub mod platform;
 
-pub use config::{validate_media_file, AppConfig, ConfigError, DisplayWallpaperConfig};
+pub use config::{
+    validate_media_file, AppConfig, ConfigError, DisplayWallpaperConfig, VideoAspectMode,
+};
 pub use engine::WallpaperEngine;
 pub use media::{MediaController, PlaybackState};
 pub use platform::{
@@ -135,7 +137,7 @@ mod tests {
     #[test]
     fn test_version_not_empty() {
         assert!(!VERSION.is_empty());
-        assert_eq!(VERSION, "0.1.0-beta.1");
+        assert_eq!(VERSION, "0.2.0-beta.1");
     }
 
     #[test]
