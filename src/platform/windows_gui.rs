@@ -10,7 +10,7 @@ use crate::config::AppConfig;
 use crate::engine::WallpaperEngine;
 use crate::media::PlaybackState;
 use crate::platform::{create_platform_adapter, PowerStatus};
-use crate::VERSION;
+use crate::{PlatformEvent, VERSION};
 use std::cell::RefCell;
 use std::mem;
 use std::path::PathBuf;
@@ -29,14 +29,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowTextLengthW, GetWindowTextW, KillTimer, PostQuitMessage, RegisterClassW, SendMessageW,
     SetForegroundWindow, SetTimer, SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK,
     BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL,
-    CB_SETCURSEL, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, MSG, SW_HIDE, SW_RESTORE,
-    SW_SHOW, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_SETFONT, WM_TIMER, WNDCLASSW,
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    CB_RESETCONTENT, CB_SETCURSEL, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, MSG,
+    PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
+    SW_HIDE, SW_RESTORE, SW_SHOW, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_POWERBROADCAST, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
-const WINDOW_CLASS_NAME: &str = "AuralisConfigStudioWindowClass";
+pub const WINDOW_CLASS_NAME: &str = "AuralisConfigStudioWindowClass";
 const WM_AURALIS_SHOW_UI: u32 = WM_APP + 1;
+const WM_AURALIS_RELOAD_CONFIG: u32 = WM_APP + 2;
 
 /// `SS_NOPREFIX` prevents `STATIC` controls from interpreting `&` as an underline accelerator.
 const SS_NOPREFIX: u32 = 0x0080;
@@ -83,9 +85,27 @@ thread_local! {
     static GUI_STATE: RefCell<Option<GuiState>> = const { RefCell::new(None) };
 }
 
+/// If a resident Auralis Configuration Studio instance is running on the desktop,
+/// send it `WM_AURALIS_RELOAD_CONFIG` so it reloads `AppConfig` and applies changes live.
+#[must_use]
+pub fn notify_running_instance_reload() -> bool {
+    WindowsPlatformAdapter::ensure_dpi_awareness();
+    let class_wide = wide_string(WINDOW_CLASS_NAME);
+    // SAFETY: FindWindowW queries the OS window table using a valid null-terminated UTF-16 class name.
+    let existing = unsafe { FindWindowW(class_wide.as_ptr(), std::ptr::null()) };
+    if existing.is_null() {
+        return false;
+    }
+    // SAFETY: SendMessageW dispatches our custom reload message to the valid existing window handle.
+    unsafe {
+        SendMessageW(existing, WM_AURALIS_RELOAD_CONFIG, 0, 0);
+    }
+    true
+}
+
 /// Query the current system DPI scaling factor relative to 96 DPI (e.g. `1.25` at 125% scaling).
 fn query_dpi_scale() -> (i32, f32) {
-    // SAFETY: GetDC(null) retrieves the screen DC to query logical DPI via GetDeviceCaps.
+    // SAFETY: GetDC(null) retrieves the screen DC, GetDeviceCaps queries logical DPI, and ReleaseDC frees it.
     unsafe {
         let hdc = GetDC(std::ptr::null_mut());
         if hdc.is_null() {
@@ -111,6 +131,7 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
     // SAFETY: FindWindowW checks for an existing Auralis configuration window on the desktop.
     let existing = unsafe { FindWindowW(class_wide.as_ptr(), std::ptr::null()) };
     if !existing.is_null() && initial_video.is_none() {
+        // SAFETY: Existing window handle is non-null; sends show message and brings it to foreground.
         unsafe {
             SendMessageW(existing, WM_AURALIS_SHOW_UI, 0, 0);
             ShowWindow(existing, SW_RESTORE);
@@ -119,8 +140,11 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
         return Ok(());
     }
 
-    let config_path = PathBuf::from("auralis_config.json");
-    let config = AppConfig::load_from_file(&config_path).unwrap_or_default();
+    let config_path = AppConfig::default_config_path();
+    let (config, load_warning) = AppConfig::load_or_recover(&config_path);
+    if let Some(warn) = &load_warning {
+        eprintln!("Warning: {warn}");
+    }
     let adapter = create_platform_adapter();
     let mut engine = WallpaperEngine::new(config, adapter).map_err(|e| e.to_string())?;
 
@@ -176,7 +200,7 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
             chk_fullscreen: std::ptr::null_mut(),
             chk_battery: std::ptr::null_mut(),
             lbl_status: std::ptr::null_mut(),
-            last_error: None,
+            last_error: load_warning,
             last_status_text: String::new(),
         });
     });
@@ -242,6 +266,7 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
             let _ = state.engine.config.save_to_file(&state.config_path);
             state.engine.shutdown();
             if !state.ui_font.is_null() {
+                // SAFETY: DeleteObject frees the GDI font handle created in run_windows_gui.
                 unsafe {
                     DeleteObject(state.ui_font);
                 }
@@ -252,6 +277,7 @@ pub fn run_windows_gui(initial_video: Option<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
+// SAFETY: Standard Win32 window procedure callback invoked on the GUI STA thread.
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     msg: u32,
@@ -263,17 +289,64 @@ unsafe extern "system" fn window_proc(
             create_child_controls(hwnd);
             sync_controls_from_state();
             update_status_readout();
-            // SAFETY: SetTimer schedules periodic engine policy & seamless loop ticks.
+            // SAFETY: SetTimer schedules periodic engine policy & seamless loop ticks on hwnd.
             unsafe { SetTimer(hwnd, ID_TIMER_TICK, TIMER_INTERVAL_MS, None) };
             0
         }
         WM_AURALIS_SHOW_UI => {
+            // SAFETY: Shows and brings the existing main configuration window to the foreground.
             unsafe {
                 ShowWindow(hwnd, SW_SHOW);
                 SetForegroundWindow(hwnd);
             }
             update_status_readout();
             0
+        }
+        WM_AURALIS_RELOAD_CONFIG => {
+            GUI_STATE.with(|cell| {
+                if let Some(state) = cell.borrow_mut().as_mut() {
+                    let (new_cfg, warn) = AppConfig::load_or_recover(&state.config_path);
+                    state.engine.config = new_cfg;
+                    state.last_error = warn;
+                    state.engine.restore_saved_wallpapers();
+                }
+            });
+            sync_controls_from_state();
+            update_status_readout();
+            0
+        }
+        WM_DISPLAYCHANGE => {
+            GUI_STATE.with(|cell| {
+                if let Some(state) = cell.borrow_mut().as_mut() {
+                    let _ = state
+                        .engine
+                        .handle_event(PlatformEvent::DisplayConfigurationChanged);
+                    repopulate_display_combo(state);
+                }
+            });
+            sync_controls_from_state();
+            update_status_readout();
+            0
+        }
+        WM_POWERBROADCAST => {
+            GUI_STATE.with(|cell| {
+                if let Some(state) = cell.borrow_mut().as_mut() {
+                    match wparam as u32 {
+                        PBT_APMSUSPEND => {
+                            let _ = state.engine.handle_event(PlatformEvent::SystemSleepEntered);
+                        }
+                        PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
+                            let _ = state.engine.handle_event(PlatformEvent::SystemWoke);
+                        }
+                        PBT_APMPOWERSTATUSCHANGE => {
+                            let _ = state.engine.evaluate_policy();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            update_status_readout();
+            1
         }
         WM_TIMER => {
             if wparam == ID_TIMER_TICK {
@@ -302,32 +375,60 @@ unsafe extern "system" fn window_proc(
             });
 
             if has_active {
+                // SAFETY: Hides hwnd while keeping the Win32 message loop and wallpaper running.
                 unsafe { ShowWindow(hwnd, SW_HIDE) };
             } else {
+                // SAFETY: Destroys hwnd and triggers WM_DESTROY to exit the application.
                 unsafe { DestroyWindow(hwnd) };
             }
             0
         }
         WM_DESTROY => {
+            // SAFETY: Stops the periodic timer and posts WM_QUIT to exit the message loop.
             unsafe {
                 KillTimer(hwnd, ID_TIMER_TICK);
                 PostQuitMessage(0);
             }
             0
         }
+        // SAFETY: DefWindowProcW handles all standard unprocessed window messages.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+fn repopulate_display_combo(state: &GuiState) {
+    if state.cmb_display.is_null() {
+        return;
+    }
+    // SAFETY: Clears existing items in the valid combo box control.
+    unsafe {
+        SendMessageW(state.cmb_display, CB_RESETCONTENT, 0, 0);
+    }
+    for d in state.engine.displays() {
+        let tag = if d.is_primary { " [Primary]" } else { "" };
+        let label = format!("{} — {} ({}x{}){}", d.id, d.name, d.width, d.height, tag);
+        let wide = wide_string(&label);
+        // SAFETY: Appends null-terminated UTF-16 display description to the combo box.
+        unsafe {
+            SendMessageW(state.cmb_display, CB_ADDSTRING, 0, wide.as_ptr() as LPARAM);
+        }
+    }
+    // SAFETY: Selects the first display item in the combo box.
+    unsafe {
+        SendMessageW(state.cmb_display, CB_SETCURSEL, 0, 0);
     }
 }
 
 fn create_child_controls(parent: HWND) {
     let (_, scale) = query_dpi_scale();
-    // SAFETY: GetModuleHandleW and GetStockObject retrieve process instance and fallback font.
+    // SAFETY: GetModuleHandleW retrieves the current process module handle.
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
     let hfont = GUI_STATE.with(|cell| {
         cell.borrow()
             .as_ref()
             .map(|s| s.ui_font)
             .filter(|f| !f.is_null())
+            // SAFETY: GetStockObject(DEFAULT_GUI_FONT) returns the system stock GUI font handle.
             .unwrap_or_else(|| unsafe { GetStockObject(DEFAULT_GUI_FONT) })
     });
 
@@ -549,23 +650,13 @@ fn create_child_controls(parent: HWND) {
             state.chk_fullscreen = chk_fullscreen;
             state.chk_battery = chk_battery;
             state.lbl_status = lbl_status;
-
-            for d in state.engine.displays() {
-                let tag = if d.is_primary { " [Primary]" } else { "" };
-                let label = format!("{} — {} ({}x{}){}", d.id, d.name, d.width, d.height, tag);
-                let wide = wide_string(&label);
-                unsafe {
-                    SendMessageW(cmb_display, CB_ADDSTRING, 0, wide.as_ptr() as LPARAM);
-                }
-            }
-            unsafe {
-                SendMessageW(cmb_display, CB_SETCURSEL, 0, 0);
-            }
+            repopulate_display_combo(state);
         }
     });
 }
 
 fn selected_display_id(state: &GuiState) -> String {
+    // SAFETY: Queries the selected item index from the valid combo box control handle.
     let idx = unsafe { SendMessageW(state.cmb_display, CB_GETCURSEL, 0, 0) };
     let index = if idx >= 0 { idx as usize } else { 0 };
     state
@@ -574,7 +665,7 @@ fn selected_display_id(state: &GuiState) -> String {
         .get(index)
         .or_else(|| state.engine.displays().first())
         .map(|d| d.id.clone())
-        .unwrap_or_else(|| "DISPLAY_1".to_string())
+        .unwrap_or_else(|| "DISPLAY1".to_string())
 }
 
 fn sync_controls_from_state() {
@@ -589,6 +680,7 @@ fn sync_controls_from_state() {
                 .as_ref())
             {
                 let wide_path = wide_string(&cfg.media_path.to_string_lossy());
+                // SAFETY: Updates the EDIT box text with a valid null-terminated UTF-16 string.
                 unsafe { SetWindowTextW(state.edt_path, wide_path.as_ptr()) };
             }
 
@@ -598,6 +690,7 @@ fn sync_controls_from_state() {
                 .map(|c| (c.muted, c.loop_playback, c.volume))
                 .unwrap_or((true, true, 0));
 
+            // SAFETY: Updates checkbox states and volume label text on valid child control handles.
             unsafe {
                 SendMessageW(
                     state.chk_mute,
@@ -675,6 +768,7 @@ fn browse_video_file(owner: HWND) -> Option<PathBuf> {
     ofn.lpstrTitle = title.as_ptr();
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
+    // SAFETY: Invokes the standard Windows modal file-open dialog with a valid OPENFILENAMEW struct.
     let chosen = unsafe { GetOpenFileNameW(&mut ofn) };
     if chosen != 0 {
         let selected = string_from_wide(&file_buf);
@@ -692,6 +786,7 @@ fn handle_command(hwnd: HWND, control_id: usize) {
                 GUI_STATE.with(|cell| {
                     if let Some(state) = cell.borrow().as_ref() {
                         let wide = wide_string(&chosen.to_string_lossy());
+                        // SAFETY: Sets the selected file path into the valid EDIT control.
                         unsafe { SetWindowTextW(state.edt_path, wide.as_ptr()) };
                     }
                 });
@@ -760,6 +855,7 @@ fn handle_command(hwnd: HWND, control_id: usize) {
             GUI_STATE.with(|cell| {
                 if let Some(state) = cell.borrow_mut().as_mut() {
                     let display_id = selected_display_id(state);
+                    // SAFETY: Queries the current check state of the mute checkbox control.
                     let checked = unsafe { SendMessageW(state.chk_mute, BM_GETCHECK, 0, 0) }
                         == BST_CHECKED as isize;
                     let cur_vol = state.engine.controller(&display_id).map_or(0, |c| c.volume);
@@ -769,6 +865,7 @@ fn handle_command(hwnd: HWND, control_id: usize) {
                         _ => cur_vol,
                     };
                     let new_mute = if control_id == ID_BTN_VOL_UP && new_vol > 0 && checked {
+                        // SAFETY: Unchecks the mute checkbox when the user explicitly raises volume above 0.
                         unsafe {
                             SendMessageW(state.chk_mute, BM_SETCHECK, BST_UNCHECKED, 0);
                         }
@@ -781,6 +878,7 @@ fn handle_command(hwnd: HWND, control_id: usize) {
                         .set_display_audio(&display_id, new_mute, new_vol);
                     let _ = state.engine.config.save_to_file(&state.config_path);
                     let vol_txt = wide_string(&format!("Volume: {new_vol}%"));
+                    // SAFETY: Updates the volume label text with a null-terminated UTF-16 string.
                     unsafe { SetWindowTextW(state.lbl_volume, vol_txt.as_ptr()) };
                 }
             });
@@ -790,6 +888,7 @@ fn handle_command(hwnd: HWND, control_id: usize) {
             GUI_STATE.with(|cell| {
                 if let Some(state) = cell.borrow_mut().as_mut() {
                     let display_id = selected_display_id(state);
+                    // SAFETY: Queries the current check state of the loop checkbox control.
                     let checked = unsafe { SendMessageW(state.chk_loop, BM_GETCHECK, 0, 0) }
                         == BST_CHECKED as isize;
                     state.engine.set_display_loop(&display_id, checked);
@@ -801,9 +900,11 @@ fn handle_command(hwnd: HWND, control_id: usize) {
         ID_CHK_FULLSCREEN | ID_CHK_BATTERY => {
             GUI_STATE.with(|cell| {
                 if let Some(state) = cell.borrow_mut().as_mut() {
+                    // SAFETY: Queries the current check state of the full-screen policy checkbox.
                     let fs_checked =
                         unsafe { SendMessageW(state.chk_fullscreen, BM_GETCHECK, 0, 0) }
                             == BST_CHECKED as isize;
+                    // SAFETY: Queries the current check state of the battery policy checkbox.
                     let bat_checked = unsafe { SendMessageW(state.chk_battery, BM_GETCHECK, 0, 0) }
                         == BST_CHECKED as isize;
                     state.engine.config.pause_on_fullscreen = fs_checked;
@@ -815,9 +916,11 @@ fn handle_command(hwnd: HWND, control_id: usize) {
             update_status_readout();
         }
         ID_BTN_HIDE => {
+            // SAFETY: Hides the main configuration window while keeping playback active.
             unsafe { ShowWindow(hwnd, SW_HIDE) };
         }
         ID_BTN_QUIT => {
+            // SAFETY: Destroys the main configuration window to trigger clean shutdown.
             unsafe { DestroyWindow(hwnd) };
         }
         _ => {}
@@ -874,6 +977,7 @@ fn update_status_readout() {
             if status_line != state.last_status_text {
                 state.last_status_text.clone_from(&status_line);
                 let wide = wide_string(&status_line);
+                // SAFETY: Updates the status STATIC control text with a null-terminated UTF-16 string.
                 unsafe { SetWindowTextW(state.lbl_status, wide.as_ptr()) };
             }
         }

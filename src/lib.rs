@@ -51,9 +51,9 @@ impl PlatformCapabilities {
         #[cfg(target_os = "macos")]
         {
             Self {
-                wallpaper_layering: true,
-                hardware_decoding: true,
-                multi_display: true,
+                wallpaper_layering: false,
+                hardware_decoding: false,
+                multi_display: false,
                 os_name: "macOS",
             }
         }
@@ -148,7 +148,8 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             assert_eq!(caps.os_name, "macOS");
-            assert!(caps.wallpaper_layering);
+            assert!(!caps.wallpaper_layering);
+            assert!(!caps.hardware_decoding);
         }
     }
 

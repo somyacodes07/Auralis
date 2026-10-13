@@ -207,19 +207,11 @@ struct FallbackPlatformAdapter;
 #[cfg(not(target_os = "windows"))]
 impl PlatformAdapter for FallbackPlatformAdapter {
     fn enumerate_displays(&self) -> Result<Vec<DisplayInfo>, PlatformError> {
-        Ok(vec![DisplayInfo {
-            id: "default".to_string(),
-            name: "Default Display".to_string(),
-            left: 0,
-            top: 0,
-            width: 1920,
-            height: 1080,
-            is_primary: true,
-        }])
+        Err(PlatformError::UnsupportedPlatform)
     }
 
     fn query_power_status(&self) -> Result<PowerStatus, PlatformError> {
-        Ok(PowerStatus::OnAcPower)
+        Ok(PowerStatus::Unknown)
     }
 
     fn is_display_occluded_by_fullscreen(&self, _display: &DisplayInfo) -> bool {
@@ -261,7 +253,7 @@ mod tests {
     #[test]
     fn test_display_info_serialization() {
         let display = DisplayInfo {
-            id: "DISPLAY_1".to_string(),
+            id: "DISPLAY1".to_string(),
             name: "Generic PnP Monitor".to_string(),
             left: 0,
             top: 0,
@@ -290,7 +282,11 @@ mod tests {
     fn test_create_platform_adapter() {
         let adapter = create_platform_adapter();
         let displays = adapter.enumerate_displays();
+        #[cfg(target_os = "windows")]
         assert!(displays.is_ok());
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(displays, Err(PlatformError::UnsupportedPlatform));
+
         let power = adapter.query_power_status();
         assert!(power.is_ok());
     }

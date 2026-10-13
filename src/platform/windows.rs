@@ -10,6 +10,7 @@ use super::{DisplayInfo, PlatformAdapter, PlatformError, PowerStatus};
 use std::collections::HashMap;
 use std::mem;
 use std::path::Path;
+use std::sync::Once;
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, DEVMODEW, ENUM_CURRENT_SETTINGS,
@@ -23,11 +24,11 @@ use windows_sys::Win32::System::StationsAndDesktops::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, FindWindowExW, FindWindowW,
     GetClassNameW, GetDesktopWindow, GetForegroundWindow, GetShellWindow, GetWindowLongPtrW,
-    GetWindowRect, IsIconic, IsWindow, IsWindowVisible, RegisterClassW, SendMessageTimeoutW,
-    SetParent, SetProcessDPIAware, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, HTTRANSPARENT,
-    SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, WM_ERASEBKGND,
-    WM_NCHITTEST, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+    GetWindowRect, IsChild, IsIconic, IsWindow, IsWindowVisible, RegisterClassW,
+    SendMessageTimeoutW, SetParent, SetProcessDPIAware, SetWindowLongPtrW, SetWindowPos, GWL_STYLE,
+    HTTRANSPARENT, SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    WM_ERASEBKGND, WM_NCHITTEST, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
 /// Message code sent to Progman to spawn the WorkerW behind desktop icons.
@@ -41,6 +42,8 @@ const WALLPAPER_HOST_CLASS_NAME: &str = "AuralisWallpaperHostWindowClass";
 
 /// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2` constant (`(DPI_AWARENESS_CONTEXT)-4`).
 const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
+
+static DESKTOP_SWITCH_ONCE: Once = Once::new();
 
 /// Native Windows wallpaper layering and Media Foundation playback adapter.
 #[derive(Debug, Default)]
@@ -78,7 +81,9 @@ impl WindowsPlatformAdapter {
             let proc_name = b"SetProcessDpiAwarenessContext\0";
             // SAFETY: Resolves SetProcessDpiAwarenessContext from user32.dll if supported (Win10 1703+).
             if let Some(addr) = unsafe { GetProcAddress(h_user32, proc_name.as_ptr()) } {
+                // SAFETY: Signature matches SetProcessDpiAwarenessContext in WinUser.h.
                 let set_ctx: FnSetProcessDpiAwarenessContext = unsafe { mem::transmute(addr) };
+                // SAFETY: Passing DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4) is always valid.
                 let ok = unsafe { set_ctx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
                 if ok != 0 {
                     return;
@@ -104,17 +109,23 @@ impl WindowsPlatformAdapter {
             return;
         }
 
-        let default_desk = wide_string("Default");
-        // SAFETY: OpenDesktopW opens a handle to the interactive "Default" desktop.
-        let h_desk = unsafe { OpenDesktopW(default_desk.as_ptr(), 0, 0, DESKTOP_ACCESS_ALL) };
-        if !h_desk.is_null() {
-            // SAFETY: SetThreadDesktop attaches the current thread to the interactive desktop.
-            // If it fails (e.g., thread already owns windows), we close the unused handle.
-            let switched = unsafe { SetThreadDesktop(h_desk) };
-            if switched == 0 {
-                unsafe { CloseDesktop(h_desk) };
+        // Guard with `Once` so `OpenDesktopW` is called at most once per process when attached
+        // to an isolated desktop. Note: per MSDN `CloseDesktop` documentation, an `HDESK` handle
+        // actively bound to a thread via `SetThreadDesktop` cannot be closed (`ERROR_BUSY`) while
+        // the thread is using it; if `SetThreadDesktop` fails, we close `h_desk` immediately.
+        DESKTOP_SWITCH_ONCE.call_once(|| {
+            let default_desk = wide_string("Default");
+            // SAFETY: OpenDesktopW opens a handle to the interactive "Default" desktop.
+            let h_desk = unsafe { OpenDesktopW(default_desk.as_ptr(), 0, 0, DESKTOP_ACCESS_ALL) };
+            if !h_desk.is_null() {
+                // SAFETY: SetThreadDesktop attaches the current thread to the interactive desktop.
+                let switched = unsafe { SetThreadDesktop(h_desk) };
+                if switched == 0 {
+                    // SAFETY: Close unused desktop handle when SetThreadDesktop did not bind it.
+                    unsafe { CloseDesktop(h_desk) };
+                }
             }
-        }
+        });
     }
 
     /// Register the custom flicker-free window class for wallpaper host windows.
@@ -131,6 +142,7 @@ impl WindowsPlatformAdapter {
                 WM_ERASEBKGND => 1,
                 // Pass mouse hit-testing through to the desktop icon layer.
                 WM_NCHITTEST => HTTRANSPARENT as LRESULT,
+                // SAFETY: DefWindowProcW is the standard Win32 default window procedure.
                 _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
             }
         }
@@ -252,8 +264,8 @@ impl WindowsPlatformAdapter {
 
         // Fallback: on Newer Windows 11 builds (24H2+), WorkerW may be a child of Progman directly
         if context.target_workerw.is_null() {
+            // SAFETY: Searches for a WorkerW child window inside Progman.
             let workerw_in_progman = unsafe {
-                // SAFETY: Searches for a WorkerW child window inside Progman.
                 FindWindowExW(
                     progman,
                     std::ptr::null_mut(),
@@ -307,6 +319,7 @@ impl PlatformAdapter for WindowsPlatformAdapter {
                 // Query true hardware physical pixel dimensions via EnumDisplaySettingsW
                 // so DPI scaling (e.g., 125% scaling turning 1920x1080 into 1536x864) never
                 // shrinks the wallpaper below full-screen physical resolution.
+                // SAFETY: DEVMODEW is a plain-old-data C struct safe to zero-initialize.
                 let mut devmode: DEVMODEW = unsafe { mem::zeroed() };
                 devmode.dmSize = mem::size_of::<DEVMODEW>() as u16;
                 // SAFETY: EnumDisplaySettingsW queries active hardware display mode for szDevice.
@@ -322,14 +335,14 @@ impl PlatformAdapter for WindowsPlatformAdapter {
                 {
                     width = devmode.dmPelsWidth;
                     height = devmode.dmPelsHeight;
-                    // Position fields in DEVMODEW union1.s2.dmPosition
+                    // SAFETY: Position fields in DEVMODEW union are initialized by EnumDisplaySettingsW.
                     let pos = unsafe { devmode.Anonymous1.Anonymous2.dmPosition };
                     left = pos.x;
                     top = pos.y;
                 }
 
                 let dev_name = string_from_wide(&info.szDevice);
-                let id = format!("DISPLAY_{}", displays.len() + 1);
+                let id = sanitize_display_id(&dev_name, displays.len() + 1);
 
                 displays.push(DisplayInfo {
                     id,
@@ -362,15 +375,9 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         }
 
         if displays.is_empty() {
-            displays.push(DisplayInfo {
-                id: "PRIMARY".to_string(),
-                name: "Primary Display".to_string(),
-                left: 0,
-                top: 0,
-                width: 1920,
-                height: 1080,
-                is_primary: true,
-            });
+            return Err(PlatformError::DisplayEnumerationFailed(
+                "No active displays reported by EnumDisplayMonitors".to_string(),
+            ));
         }
 
         Ok(displays)
@@ -468,6 +475,7 @@ impl PlatformAdapter for WindowsPlatformAdapter {
 
         // SAFETY: RECT is a plain C struct safe to zero-initialize; GetWindowRect populates it.
         let mut rect: RECT = unsafe { mem::zeroed() };
+        // SAFETY: GetWindowRect reads the screen bounds of fg_hwnd into rect.
         if unsafe { GetWindowRect(fg_hwnd, &mut rect) } == 0 {
             return false;
         }
@@ -497,7 +505,9 @@ impl PlatformAdapter for WindowsPlatformAdapter {
 
         // Compute coordinates relative to WorkerW's origin so the child window fills 100%
         // of the target monitor in physical pixels.
+        // SAFETY: RECT is a plain-old-data C struct safe to zero-initialize.
         let mut workerw_rect: RECT = unsafe { mem::zeroed() };
+        // SAFETY: GetWindowRect populates workerw_rect for the valid workerw handle.
         let (rel_left, rel_top) = if unsafe { GetWindowRect(workerw, &mut workerw_rect) } != 0 {
             (
                 display.left - workerw_rect.left,
@@ -532,11 +542,24 @@ impl PlatformAdapter for WindowsPlatformAdapter {
             )));
         }
 
-        // Attach the host window into the WorkerW layer behind desktop icons and transition
-        // its window style from WS_POPUP to WS_CHILD so the desktop compositor layers it cleanly.
-        // SAFETY: SetParent and SetWindowLongPtrW operate on our valid hwnd and workerw.
+        // Attach the host window into the WorkerW layer behind desktop icons, verify parent-child
+        // relationship via IsChild, and transition its style from WS_POPUP to WS_CHILD.
+        // SAFETY: SetParent, IsChild, and DestroyWindow operate on valid hwnd and workerw handles.
+        let attached = unsafe {
+            let prev = SetParent(hwnd, workerw);
+            !prev.is_null() || IsChild(workerw, hwnd) != 0
+        };
+        if !attached {
+            // SAFETY: Clean up the unattached host window before returning an error.
+            unsafe { DestroyWindow(hwnd) };
+            return Err(PlatformError::AttachmentFailed(format!(
+                "SetParent failed to attach host window into WorkerW for display {}",
+                display.id
+            )));
+        }
+
+        // SAFETY: Updates window style to WS_CHILD and positions the window inside WorkerW.
         unsafe {
-            SetParent(hwnd, workerw);
             let cur_style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
             let child_style =
                 (cur_style & !WS_POPUP) | WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
@@ -568,6 +591,7 @@ impl PlatformAdapter for WindowsPlatformAdapter {
 
         // SAFETY: Check if window handle is valid before detaching and destroying.
         if unsafe { IsWindow(hwnd) } != 0 {
+            // SAFETY: Detaches hwnd from WorkerW and destroys it.
             unsafe {
                 SetParent(hwnd, std::ptr::null_mut());
                 DestroyWindow(hwnd);
@@ -589,8 +613,17 @@ impl PlatformAdapter for WindowsPlatformAdapter {
             ));
         }
 
-        // SAFETY: SetParent attaches the wallpaper window handle into the desktop WorkerW container.
-        unsafe { SetParent(child_hwnd, workerw) };
+        // SAFETY: SetParent attaches the wallpaper window handle into the desktop WorkerW container,
+        // and IsChild verifies the parent-child relationship.
+        let attached = unsafe {
+            let prev = SetParent(child_hwnd, workerw);
+            !prev.is_null() || IsChild(workerw, child_hwnd) != 0
+        };
+        if !attached {
+            return Err(PlatformError::AttachmentFailed(
+                "SetParent failed to attach window into WorkerW".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -669,6 +702,23 @@ impl PlatformAdapter for WindowsPlatformAdapter {
     }
 }
 
+/// Derive a stable, alphanumeric display identifier from the Win32 `szDevice` string
+/// (e.g. `\\.\DISPLAY1` -> `DISPLAY1`).
+pub(crate) fn sanitize_display_id(device_name: &str, fallback_index: usize) -> String {
+    let trimmed = device_name
+        .trim_start_matches(r"\\.\")
+        .trim_start_matches(r"\\?\");
+    let cleaned: String = trimmed
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if cleaned.is_empty() {
+        format!("DISPLAY{fallback_index}")
+    } else {
+        cleaned
+    }
+}
+
 /// Converts a Rust string slice to a null-terminated UTF-16 wide string.
 pub(crate) fn wide_string(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -693,6 +743,13 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_display_id() {
+        assert_eq!(sanitize_display_id(r"\\.\DISPLAY1", 1), "DISPLAY1");
+        assert_eq!(sanitize_display_id(r"\\.\DISPLAY2", 2), "DISPLAY2");
+        assert_eq!(sanitize_display_id("", 3), "DISPLAY3");
+    }
+
+    #[test]
     fn test_windows_adapter_instantiation() {
         let adapter = WindowsPlatformAdapter::new();
         assert!(adapter.workerw_handle.is_none());
@@ -707,6 +764,7 @@ mod tests {
         assert!(!list.is_empty());
         assert!(list.iter().any(|d| d.is_primary));
         for d in &list {
+            assert!(d.id.starts_with("DISPLAY"));
             assert!(d.width > 0);
             assert!(d.height > 0);
         }

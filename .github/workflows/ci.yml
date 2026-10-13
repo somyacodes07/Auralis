@@ -62,13 +62,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run Unit & Integration Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Release Build
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --locked
 
   macos-build-and-test:
     name: macOS Native Verification
@@ -87,10 +87,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run Unit & Integration Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Release Build
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --locked

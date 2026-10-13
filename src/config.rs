@@ -1,6 +1,7 @@
 //! Auralis Configuration & Media Validation
 //!
-//! Handles validated, atomic configuration persistence adhering to AGENTS.md data safety principles.
+//! Handles validated, atomic configuration persistence, schema versioning, and
+//! corrupt-file backup recovery adhering to `AGENTS.md` data safety principles.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -9,6 +10,13 @@ use std::path::{Path, PathBuf};
 
 /// Allowed video media extensions for desktop wallpaper playback.
 pub const SUPPORTED_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv", "webm", "m4v"];
+
+/// Current configuration schema version.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+const fn default_schema_version() -> u32 {
+    CURRENT_SCHEMA_VERSION
+}
 
 /// Errors that can occur during media validation or configuration operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,9 +79,12 @@ impl DisplayWallpaperConfig {
 /// Root application configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// Schema version for safe forward/backward configuration migrations.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     /// Default wallpaper configuration applied to unassigned displays.
     pub default_wallpaper: Option<DisplayWallpaperConfig>,
-    /// Display-specific wallpaper configurations mapped by display identifier.
+    /// Display-specific wallpaper configurations mapped by stable display identifier.
     pub per_display: HashMap<String, DisplayWallpaperConfig>,
     /// Automatically pause playback when full-screen applications are focused.
     pub pause_on_fullscreen: bool,
@@ -86,6 +97,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
             default_wallpaper: None,
             per_display: HashMap::new(),
             pause_on_fullscreen: true,
@@ -96,6 +108,73 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// Return the platform-standard per-user configuration file path
+    /// (e.g., `%APPDATA%\Auralis\auralis_config.json` on Windows, or
+    /// `~/Library/Application Support/Auralis/auralis_config.json` on macOS).
+    #[must_use]
+    pub fn default_config_path() -> PathBuf {
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(appdata) = std::env::var_os("APPDATA") {
+                if !appdata.is_empty() {
+                    return PathBuf::from(appdata)
+                        .join("Auralis")
+                        .join("auralis_config.json");
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(home) = std::env::var_os("HOME") {
+                if !home.is_empty() {
+                    return PathBuf::from(home)
+                        .join("Library")
+                        .join("Application Support")
+                        .join("Auralis")
+                        .join("auralis_config.json");
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+                if !xdg.is_empty() {
+                    return PathBuf::from(xdg)
+                        .join("auralis")
+                        .join("auralis_config.json");
+                }
+            }
+            if let Some(home) = std::env::var_os("HOME") {
+                if !home.is_empty() {
+                    return PathBuf::from(home)
+                        .join(".config")
+                        .join("auralis")
+                        .join("auralis_config.json");
+                }
+            }
+        }
+        PathBuf::from("auralis_config.json")
+    }
+
+    /// Normalize legacy enumeration-indexed display keys (e.g. `DISPLAY_1` -> `DISPLAY1`)
+    /// to match stable hardware device identifiers.
+    pub fn migrate_legacy_keys(&mut self) {
+        let keys: Vec<String> = self.per_display.keys().cloned().collect();
+        for key in keys {
+            if let Some(suffix) = key.strip_prefix("DISPLAY_") {
+                if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+                    let normalized = format!("DISPLAY{suffix}");
+                    if let Some(val) = self.per_display.remove(&key) {
+                        self.per_display.entry(normalized).or_insert(val);
+                    }
+                }
+            }
+        }
+        if self.schema_version == 0 {
+            self.schema_version = CURRENT_SCHEMA_VERSION;
+        }
+    }
+
     /// Load configuration from a JSON file. If the file does not exist, returns default configuration.
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
         if !path.exists() {
@@ -103,13 +182,43 @@ impl AppConfig {
         }
 
         let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
-        serde_json::from_str(&content).map_err(|e| ConfigError::ParseError(e.to_string()))
+        let mut cfg: Self =
+            serde_json::from_str(&content).map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        cfg.migrate_legacy_keys();
+        Ok(cfg)
+    }
+
+    /// Load configuration from `path`, or if the file is corrupt, back it up to
+    /// `<path>.corrupt.bak` before returning safe defaults and a diagnostic warning message.
+    #[must_use]
+    pub fn load_or_recover(path: &Path) -> (Self, Option<String>) {
+        match Self::load_from_file(path) {
+            Ok(cfg) => (cfg, None),
+            Err(err) => {
+                let backup_path = path.with_extension("json.corrupt.bak");
+                let backup_note = if path.exists() {
+                    match fs::copy(path, &backup_path) {
+                        Ok(_) => format!(" (backed up corrupt file to {})", backup_path.display()),
+                        Err(copy_err) => format!(" (backup failed: {copy_err})"),
+                    }
+                } else {
+                    String::new()
+                };
+                let warning = format!(
+                    "Configuration at '{}' could not be loaded: {err}{backup_note}. Using safe defaults.",
+                    path.display()
+                );
+                (Self::default(), Some(warning))
+            }
+        }
     }
 
     /// Atomically save configuration to disk via a temporary file to avoid corrupting user settings.
     pub fn save_to_file(&self, path: &Path) -> Result<(), ConfigError> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| ConfigError::IoError(e.to_string()))?;
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).map_err(|e| ConfigError::IoError(e.to_string()))?;
+            }
         }
 
         let json = serde_json::to_string_pretty(self)
@@ -159,6 +268,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = AppConfig::default();
+        assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
         assert!(config.pause_on_fullscreen);
         assert!(config.pause_on_battery);
         assert!(!config.launch_at_startup);
@@ -183,10 +293,58 @@ mod tests {
         let loaded = AppConfig::load_from_file(&config_file);
         assert!(loaded.is_ok());
         let loaded = loaded.unwrap();
+        assert_eq!(loaded.schema_version, CURRENT_SCHEMA_VERSION);
         assert!(loaded.launch_at_startup);
         assert!(!loaded.pause_on_battery);
 
         // Cleanup
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_corrupt_config_backup_and_recovery() {
+        let temp_dir = std::env::temp_dir().join("auralis_test_corrupt_config");
+        let _ = fs::create_dir_all(&temp_dir);
+        let config_file = temp_dir.join("auralis_config.json");
+        fs::write(&config_file, b"{ invalid json payload ").unwrap();
+
+        let (recovered, warning) = AppConfig::load_or_recover(&config_file);
+        assert_eq!(recovered, AppConfig::default());
+        assert!(warning.is_some());
+
+        let backup_file = config_file.with_extension("json.corrupt.bak");
+        assert!(backup_file.exists());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_legacy_display_id_migration() {
+        let temp_dir = std::env::temp_dir().join("auralis_test_migration");
+        let _ = fs::create_dir_all(&temp_dir);
+        let config_file = temp_dir.join("legacy_config.json");
+
+        let raw_json = r#"{
+            "default_wallpaper": null,
+            "per_display": {
+                "DISPLAY_1": {
+                    "media_path": "sample.mp4",
+                    "loop_playback": true,
+                    "muted": true,
+                    "volume": 0
+                }
+            },
+            "pause_on_fullscreen": true,
+            "pause_on_battery": true,
+            "launch_at_startup": false
+        }"#;
+        fs::write(&config_file, raw_json).unwrap();
+
+        let loaded = AppConfig::load_from_file(&config_file).unwrap();
+        assert_eq!(loaded.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(loaded.per_display.contains_key("DISPLAY1"));
+        assert!(!loaded.per_display.contains_key("DISPLAY_1"));
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 

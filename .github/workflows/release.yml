@@ -43,10 +43,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run Tests
-        run: cargo test --workspace --release
+        run: cargo test --workspace --release --locked
 
       - name: Build Release Binary
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --locked
 
       - name: Package Windows Artifact
         shell: pwsh
@@ -75,10 +75,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run Tests
-        run: cargo test --workspace --release
+        run: cargo test --workspace --release --locked
 
       - name: Build Release Binary
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --locked
 
       - name: Package macOS Artifact
         run: |
@@ -112,10 +112,10 @@ jobs:
           find release-artifacts -type f -exec cp {} final-dist/ \;
           ls -la final-dist/
 
-      - name: Publish GitHub Release
+      - name: Create Draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          draft: false
+          draft: true
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
           files: final-dist/*
           body: |
@@ -124,9 +124,8 @@ jobs:
             ### Source Commit
             `${{ github.sha }}`
 
-            ### Verification Status
-            - Windows native build & test: Passed
-            - macOS native build & test: Passed
+            ### Platform Support Status
+            - **Windows (`auralis-windows-x86_64.exe`)**: Native `WorkerW` desktop layering, Media Foundation (`mfplay.dll`) hardware video playback, Per-Monitor V2 DPI full-screen scaling, and Win32 Configuration Studio UI.
+            - **macOS (`auralis-macos-universal`)**: Portable core CLI/validation binary only (native `AVFoundation`/`NSWindow` desktop wallpaper adapter is not yet implemented).
 
-            ### Known Limitations
-            *(See CHANGELOG.md for detailed platform status and known gaps)*
+            *(See `CHANGELOG.md` for full details and known limitations.)*

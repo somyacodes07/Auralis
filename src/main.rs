@@ -1,8 +1,8 @@
 //! Auralis Application Entry Point & CLI
 
 use auralis::{
-    create_platform_adapter, validate_media_file, AppConfig, PlatformCapabilities, PowerStatus,
-    WallpaperEngine, VERSION,
+    create_platform_adapter, validate_media_file, AppConfig, DisplayWallpaperConfig,
+    PlatformCapabilities, PowerStatus, WallpaperEngine, VERSION,
 };
 use std::env;
 use std::path::PathBuf;
@@ -70,7 +70,7 @@ fn print_help() {
     println!("  auralis [gui] [file]                 Launch Auralis Configuration Studio UI");
     println!("  auralis status                       Show system, display, and power status");
     println!("  auralis validate <file>              Validate a video file for wallpaper playback");
-    println!("  auralis apply <file> [display_id]    Apply a video wallpaper and persist config");
+    println!("  auralis apply <file> [display_id]    Configure wallpaper and reload active session if running");
     println!(
         "  auralis play <file> [seconds]        Play a live video wallpaper for N seconds and exit"
     );
@@ -107,8 +107,13 @@ fn run_status() -> ExitCode {
     println!("Hardware Decoding Native:  {}", caps.hardware_decoding);
     println!("Multi-Display Support:     {}", caps.multi_display);
 
-    let config_path = PathBuf::from("auralis_config.json");
-    let config = AppConfig::load_from_file(&config_path).unwrap_or_default();
+    let config_path = AppConfig::default_config_path();
+    let (config, warning) = AppConfig::load_or_recover(&config_path);
+    if let Some(w) = warning {
+        eprintln!("Warning: {w}");
+    }
+    println!("Configuration File:        {}", config_path.display());
+
     let adapter = create_platform_adapter();
 
     match WallpaperEngine::new(config, adapter) {
@@ -192,53 +197,100 @@ fn run_validate(path: PathBuf) -> ExitCode {
 }
 
 fn run_apply(path: PathBuf, target_display: Option<&str>) -> ExitCode {
-    let config_path = PathBuf::from("auralis_config.json");
-    let config = AppConfig::load_from_file(&config_path).unwrap_or_default();
-    let adapter = create_platform_adapter();
-
-    let mut engine = match WallpaperEngine::new(config, adapter) {
-        Ok(eng) => eng,
+    let wp_cfg = match DisplayWallpaperConfig::new(path.clone()) {
+        Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("Failed to initialize engine: {e}");
+            eprintln!("[ERROR] Failed to validate wallpaper media: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let config_path = AppConfig::default_config_path();
+    let (mut config, warning) = AppConfig::load_or_recover(&config_path);
+    if let Some(w) = warning {
+        eprintln!("Warning: {w}");
+    }
+
+    let adapter = create_platform_adapter();
+    let displays = match adapter.enumerate_displays() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[ERROR] Failed to enumerate displays: {e}");
             return ExitCode::FAILURE;
         }
     };
 
     let display_id = if let Some(id) = target_display {
+        if !displays.iter().any(|d| d.id == id) {
+            eprintln!("[ERROR] Display '{id}' not found among active monitors.");
+            return ExitCode::FAILURE;
+        }
         id.to_string()
-    } else if let Some(primary) = engine.displays().iter().find(|d| d.is_primary) {
+    } else if let Some(primary) = displays.iter().find(|d| d.is_primary) {
         primary.id.clone()
-    } else if let Some(first) = engine.displays().first() {
+    } else if let Some(first) = displays.first() {
         first.id.clone()
     } else {
-        eprintln!("No displays available.");
+        eprintln!("[ERROR] No active displays available.");
         return ExitCode::FAILURE;
     };
 
-    match engine.apply_wallpaper(&display_id, path.clone()) {
-        Ok(()) => {
-            if let Err(e) = engine.config.save_to_file(&config_path) {
-                eprintln!("Warning: Wallpaper applied but config save failed: {e}");
-                return ExitCode::FAILURE;
-            }
-            println!(
-                "[APPLIED] Wallpaper '{}' active on display [{}] and saved to {}.",
-                path.display(),
-                display_id,
-                config_path.display()
-            );
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("[ERROR] Failed to apply wallpaper: {e}");
-            ExitCode::FAILURE
-        }
+    // Preserve user audio/loop settings if already configured on this display or default
+    let mut final_wp = wp_cfg;
+    if let Some(existing) = config
+        .per_display
+        .get(&display_id)
+        .or(config.default_wallpaper.as_ref())
+    {
+        final_wp.loop_playback = existing.loop_playback;
+        final_wp.muted = existing.muted;
+        final_wp.volume = existing.volume;
     }
+
+    config
+        .per_display
+        .insert(display_id.clone(), final_wp.clone());
+    if config.default_wallpaper.is_none() || displays.len() == 1 {
+        config.default_wallpaper = Some(final_wp);
+    }
+
+    if let Err(e) = config.save_to_file(&config_path) {
+        eprintln!(
+            "[ERROR] Failed to save configuration to {}: {e}",
+            config_path.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    #[cfg(target_os = "windows")]
+    let notified_running = auralis::platform::windows_gui::notify_running_instance_reload();
+    #[cfg(not(target_os = "windows"))]
+    let notified_running = false;
+
+    if notified_running {
+        println!(
+            "[APPLIED] Wallpaper '{}' saved to {} and reloaded in active Auralis session on [{}].",
+            path.display(),
+            config_path.display(),
+            display_id
+        );
+    } else {
+        println!(
+            "[CONFIGURED] Wallpaper '{}' validated and saved for display [{}] in {} (no resident renderer running; run 'auralis gui' or 'auralis play' to start playback).",
+            path.display(),
+            display_id,
+            config_path.display()
+        );
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_play_for_duration(path: PathBuf, seconds: u64) -> ExitCode {
-    let config_path = PathBuf::from("auralis_config.json");
-    let mut config = AppConfig::load_from_file(&config_path).unwrap_or_default();
+    let config_path = AppConfig::default_config_path();
+    let (mut config, warning) = AppConfig::load_or_recover(&config_path);
+    if let Some(w) = warning {
+        eprintln!("Warning: {w}");
+    }
     // Ensure battery pause does not block explicit CLI verification playback
     config.pause_on_battery = false;
     let adapter = create_platform_adapter();
@@ -257,7 +309,7 @@ fn run_play_for_duration(path: PathBuf, seconds: u64) -> ExitCode {
         .find(|d| d.is_primary)
         .or_else(|| engine.displays().first())
         .map(|d| d.id.clone())
-        .unwrap_or_else(|| "DISPLAY_1".to_string());
+        .unwrap_or_else(|| "DISPLAY1".to_string());
 
     if let Err(e) = engine.apply_wallpaper(&display_id, path.clone()) {
         eprintln!("[ERROR] Failed to start hardware video playback: {e}");
@@ -275,6 +327,7 @@ fn run_play_for_duration(path: PathBuf, seconds: u64) -> ExitCode {
     let total = Duration::from_secs(seconds);
     while start.elapsed() < total {
         #[cfg(target_os = "windows")]
+        // SAFETY: Standard Win32 non-blocking PeekMessageW loop on the current STA thread.
         unsafe {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
@@ -304,11 +357,14 @@ fn run_verify_desktop() -> ExitCode {
         }
     };
 
-    let primary = displays
+    let Some(primary) = displays
         .iter()
         .find(|d| d.is_primary)
         .or_else(|| displays.first())
-        .expect("At least one display must be returned");
+    else {
+        eprintln!("[FAIL] No active displays found.");
+        return ExitCode::FAILURE;
+    };
 
     println!(
         "Verifying native desktop layering on [{}] ({}x{} at {}, {})...",

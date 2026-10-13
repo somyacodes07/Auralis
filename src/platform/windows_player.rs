@@ -340,8 +340,9 @@ impl MfVideoPlayer {
             )));
         }
 
-        // SAFETY: SetMediaItem attaches the loaded media item; we then release our local item ref.
+        // SAFETY: SetMediaItem attaches the loaded media item to the MFPlay session.
         let hr_set = unsafe { ((*(*player).vtbl).set_media_item)(player, item) };
+        // SAFETY: Release our local reference to `item` now that the session holds its own reference.
         unsafe {
             ((*(*item).vtbl).release)(item as *mut c_void);
         }
