@@ -9,6 +9,15 @@ Write-Host "========================================" -ForegroundColor Cyan
 
 # 1. Verify Cargo / Rust toolchain availability
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    if (Test-Path "$HOME\.cargo\bin\cargo.exe") {
+        $env:Path = "$HOME\.cargo\bin;" + $env:Path
+    }
+}
+if ((Test-Path "C:\MinGW\bin\gcc.exe") -and (-not (Get-Command gcc -ErrorAction SilentlyContinue))) {
+    $env:Path = "C:\MinGW\bin;" + $env:Path
+}
+
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     Write-Host "[ERROR] 'cargo' is not found in PATH." -ForegroundColor Red
     Write-Host "Please install Rust (https://rustup.rs/) and ensure cargo is in PATH." -ForegroundColor Yellow
     exit 1

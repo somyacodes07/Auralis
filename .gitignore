@@ -17,6 +17,7 @@ ehthumbs.db
 # OpenCode & local agent artifacts
 .opencode/plans/
 .opencode/tool-output/
+.freebuff/
 *.log
 
 # Local test media (never commit user media files)

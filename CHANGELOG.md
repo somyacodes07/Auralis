@@ -12,7 +12,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - GitHub Actions CI matrix workflow (`.github/workflows/ci.yml`) on native `windows-latest` and `macos-latest` runners.
 - Deliberate, tag-driven release workflow (`.github/workflows/release.yml`) with version alignment verification and draft release publishing.
 - Core Rust crate structure (`Cargo.toml`, `src/lib.rs`, `src/main.rs`) and toolchain definition (`rust-toolchain.toml`).
+- Safe configuration persistence module (`src/config.rs`) with atomic file write and media format validation.
+- Media playback controller state machine (`src/media/mod.rs`) with volume clamping and resilient fallback recovery.
+- Native Windows platform adapter (`src/platform/windows.rs`) supporting desktop layering via Progman/WorkerW architecture and multi-display monitor enumeration via `EnumDisplayMonitors`.
+
+### Fixed
+- Local verification suite (`scripts/verify.ps1`) enhanced to auto-detect and configure local cargo and MinGW linker environment paths.
 
 ### Known Limitations
-- Native wallpaper layering behind desktop icons is currently in foundational architectural design; platform bridges for Windows (Media Foundation) and macOS (AVFoundation) are staged for initial implementation in upcoming tasks.
-- Local host environment does not currently have `cargo` in PATH; full local compilation gate requires Rust toolchain installation on developer host.
+- Hardware video decoder backend (Media Foundation on Windows and AVFoundation on macOS) is in architectural staging; full rendering window integration scheduled for next iteration.
+- Local verification completed and passing on Windows host; macOS native execution is verified via GitHub Actions CI runner.

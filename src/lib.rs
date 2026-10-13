@@ -10,6 +10,14 @@
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod config;
+pub mod media;
+pub mod platform;
+
+pub use config::{validate_media_file, AppConfig, ConfigError, DisplayWallpaperConfig};
+pub use media::{MediaController, PlaybackState};
+pub use platform::{create_platform_adapter, DisplayInfo, PlatformAdapter, PlatformError};
+
 /// Supported platform capabilities detected at runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformCapabilities {
