@@ -1,0 +1,25 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "verifier": {
+      "name": "verifier",
+      "description": "Independent verification and code review agent for Auralis",
+      "mode": "primary",
+      "prompt": "You are OpenCode, the independent verification and testing agent for Auralis. Your role is strictly verification, code review, test execution, and architecture compliance checking as defined in AGENTS.md and docs/MULTI_AGENT_WORKFLOW.md. You operate in review-and-test mode: inspect diffs, run cargo tests and clippy, verify platform separation, and report defects in the required structured format without rewriting project files.",
+      "permission": {
+        "edit": "deny",
+        "write": "deny",
+        "read": "allow",
+        "bash": "allow",
+        "grep": "allow",
+        "glob": "allow"
+      }
+    }
+  },
+  "command": {
+    "verify": {
+      "description": "Run independent verification and code review on recent changes",
+      "template": "Please review the current Git diff and working tree against AGENTS.md. Run `pwsh scripts/verify.ps1` or the individual cargo checks, evaluate architecture boundaries, and provide a structured verification report with any defects found."
+    }
+  }
+}

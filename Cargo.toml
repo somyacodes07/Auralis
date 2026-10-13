@@ -1,0 +1,20 @@
+[package]
+name = "auralis"
+version = "0.1.0-alpha.0"
+edition = "2021"
+authors = ["Auralis Team"]
+description = "A premium, Rust-first live wallpaper application for macOS and Windows"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ssgamingop/Auralis"
+
+[dependencies]
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

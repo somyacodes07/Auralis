@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: write
+
+jobs:
+  validate-tag:
+    name: Validate Version Alignment
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Tag Matches Cargo Version
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          VERSION_FROM_TAG="${TAG_NAME#v}"
+          VERSION_FROM_CARGO=$(cargo metadata --no-deps --format-version 1 | grep -o '"version":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+          echo "Release tag: $TAG_NAME (extracted version: $VERSION_FROM_TAG)"
+          echo "Cargo manifest version: $VERSION_FROM_CARGO"
+          if [ "$VERSION_FROM_TAG" != "$VERSION_FROM_CARGO" ]; then
+            echo "ERROR: Git tag version ($VERSION_FROM_TAG) does not match Cargo.toml version ($VERSION_FROM_CARGO)!"
+            exit 1
+          fi
+          echo "Version verified successfully."
+
+  build-windows:
+    name: Build Windows Release Binary
+    needs: validate-tag
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Tests
+        run: cargo test --workspace --release
+
+      - name: Build Release Binary
+        run: cargo build --workspace --release
+
+      - name: Package Windows Artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/release/auralis.exe dist/auralis-windows-x86_64.exe
+          $hash = (Get-FileHash dist/auralis-windows-x86_64.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  auralis-windows-x86_64.exe" | Out-File -Encoding ascii dist/auralis-windows-x86_64.exe.sha256
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auralis-windows-x86_64
+          path: dist/*
+
+  build-macos:
+    name: Build macOS Release Binary
+    needs: validate-tag
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Tests
+        run: cargo test --workspace --release
+
+      - name: Build Release Binary
+        run: cargo build --workspace --release
+
+      - name: Package macOS Artifact
+        run: |
+          mkdir -p dist
+          cp target/release/auralis dist/auralis-macos-universal
+          shasum -a 256 dist/auralis-macos-universal > dist/auralis-macos-universal.sha256
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auralis-macos-universal
+          path: dist/*
+
+  draft-release:
+    name: Create Draft Release
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Prepare Assets
+        run: |
+          mkdir -p final-dist
+          find release-artifacts -type f -exec cp {} final-dist/ \;
+          ls -la final-dist/
+
+      - name: Create Draft Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta')
+          files: final-dist/*
+          body: |
+            ## Auralis Release ${{ github.ref_name }}
+
+            ### Source Commit
+            `${{ github.sha }}`
+
+            ### Verification Status
+            - Windows native build & test: Passed
+            - macOS native build & test: Passed
+
+            ### Known Limitations
+            *(See CHANGELOG.md for detailed platform status and known gaps)*

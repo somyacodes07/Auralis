@@ -1,0 +1,16 @@
+# Auto detect text files and perform LF normalization on checkin
+* text=auto
+
+# Source code and config
+*.rs text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Shell scripts must have LF line endings
+*.sh text eol=lf
+
+# PowerShell scripts
+*.ps1 text
