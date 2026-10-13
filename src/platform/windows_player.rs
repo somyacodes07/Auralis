@@ -247,12 +247,16 @@ impl MfVideoPlayer {
     }
 
     /// Pump pending thread messages briefly so MFPlay can process asynchronous `SetMediaItem`
-    /// topology binding on the apartment thread.
+    /// topology binding on the apartment thread without re-entering GUI `WM_TIMER` handlers.
     fn pump_pending_messages() {
-        // SAFETY: Standard non-blocking PeekMessageW loop for the current thread.
+        const WM_TIMER_MSG: u32 = 0x0113;
+        // SAFETY: Standard non-blocking PeekMessageW loop for the current STA thread.
         unsafe {
             let mut msg: MSG = mem::zeroed();
             while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                if msg.message == WM_TIMER_MSG {
+                    continue;
+                }
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -282,14 +286,7 @@ impl MfVideoPlayer {
         let create_fn = Self::load_create_fn()?;
 
         let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let clean_path_str = abs_path
-            .to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .to_string();
-        let wide_url: Vec<u16> = clean_path_str
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let _ = abs_path;
 
         let mut player: *mut ImfpMediaPlayer = std::ptr::null_mut();
 
@@ -320,7 +317,38 @@ impl MfVideoPlayer {
             evr_initialized: false,
         };
 
-        // Load media item synchronously so invalid/corrupt files are caught immediately
+        instance.load_and_play(path, muted, volume)?;
+        Ok(instance)
+    }
+
+    /// Synchronously validate and load a new video file into this existing player instance.
+    ///
+    /// If `CreateMediaItemFromURL` rejects the file, the previously playing media item on this
+    /// player remains untouched and continues playing (`AGENTS.md` Principle 9).
+    pub fn load_and_play(
+        &mut self,
+        path: &Path,
+        muted: bool,
+        volume: u8,
+    ) -> Result<(), PlatformError> {
+        let player = self.as_ptr();
+        if player.is_null() {
+            return Err(PlatformError::MediaPlaybackFailed(
+                "Media player is shut down".to_string(),
+            ));
+        }
+
+        let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let clean_path_str = abs_path
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_string();
+        let wide_url: Vec<u16> = clean_path_str
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        // Load media item synchronously so invalid/corrupt files are caught before modifying state
         let mut item: *mut ImfpMediaItem = std::ptr::null_mut();
         // SAFETY: Calls CreateMediaItemFromURL with fSync = 1 (TRUE) on valid COM interface.
         let hr_item = unsafe {
@@ -340,6 +368,11 @@ impl MfVideoPlayer {
             )));
         }
 
+        self.muted = muted;
+        self.volume = volume.min(100);
+        self.duration_100ns = None;
+        self.evr_initialized = false;
+
         // SAFETY: SetMediaItem attaches the loaded media item to the MFPlay session.
         let hr_set = unsafe { ((*(*player).vtbl).set_media_item)(player, item) };
         // SAFETY: Release our local reference to `item` now that the session holds its own reference.
@@ -358,19 +391,20 @@ impl MfVideoPlayer {
         let wait_start = Instant::now();
         while wait_start.elapsed() < Duration::from_millis(350) {
             Self::pump_pending_messages();
-            if instance.state().unwrap_or(MFP_STATE_EMPTY) != MFP_STATE_EMPTY {
+            let st = self.state().unwrap_or(MFP_STATE_EMPTY);
+            if st == MFP_STATE_STOPPED || st == MFP_STATE_PAUSED || st == MFP_STATE_PLAYING {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        instance.apply_evr_and_audio_settings();
-        instance.play()?;
+        self.apply_evr_and_audio_settings();
+        self.play()?;
         Self::pump_pending_messages();
-        instance.apply_evr_and_audio_settings();
-        instance.duration_100ns = instance.query_duration_100ns();
+        self.apply_evr_and_audio_settings();
+        self.duration_100ns = self.query_duration_100ns();
 
-        Ok(instance)
+        Ok(())
     }
 
     #[inline]

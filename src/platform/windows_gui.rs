@@ -4,6 +4,10 @@
 //! with an embedded hardware-decoded video preview panel, drag-and-drop file support,
 //! a persistent Windows system tray icon (`Shell_NotifyIconW`) with right-click context menu,
 //! Windows login startup registration, and real-time hardware/process telemetry.
+//!
+//! All thread-local state accesses use `try_borrow` / `try_borrow_mut` and perform Win32
+//! message-sending calls outside borrows where practical so synchronous Win32 message
+//! re-entrancy can never trigger a `RefCell` borrow panic.
 
 use super::windows::{string_from_wide, wide_string, WindowsPlatformAdapter};
 use super::windows_player::MfVideoPlayer;
@@ -243,26 +247,28 @@ pub fn run_windows_gui(
     };
 
     GUI_STATE.with(|cell| {
-        *cell.borrow_mut() = Some(GuiState {
-            engine,
-            config_path,
-            ui_font,
-            cmb_display: std::ptr::null_mut(),
-            edt_path: std::ptr::null_mut(),
-            chk_mute: std::ptr::null_mut(),
-            chk_loop: std::ptr::null_mut(),
-            lbl_volume: std::ptr::null_mut(),
-            chk_fullscreen: std::ptr::null_mut(),
-            chk_battery: std::ptr::null_mut(),
-            chk_startup: std::ptr::null_mut(),
-            hwnd_preview: std::ptr::null_mut(),
-            preview_player: None,
-            preview_path: None,
-            lbl_status: std::ptr::null_mut(),
-            last_error: load_warning,
-            last_status_text: String::new(),
-            tray_added: false,
-        });
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            *guard = Some(GuiState {
+                engine,
+                config_path,
+                ui_font,
+                cmb_display: std::ptr::null_mut(),
+                edt_path: std::ptr::null_mut(),
+                chk_mute: std::ptr::null_mut(),
+                chk_loop: std::ptr::null_mut(),
+                lbl_volume: std::ptr::null_mut(),
+                chk_fullscreen: std::ptr::null_mut(),
+                chk_battery: std::ptr::null_mut(),
+                chk_startup: std::ptr::null_mut(),
+                hwnd_preview: std::ptr::null_mut(),
+                preview_player: None,
+                preview_path: None,
+                lbl_status: std::ptr::null_mut(),
+                last_error: load_warning,
+                last_status_text: String::new(),
+                tray_added: false,
+            });
+        }
     });
 
     // SAFETY: GetModuleHandleW(null) retrieves the current process module handle.
@@ -333,16 +339,18 @@ pub fn run_windows_gui(
 
     // Clean shutdown when the message loop exits
     GUI_STATE.with(|cell| {
-        if let Some(mut state) = cell.borrow_mut().take() {
-            if let Some(mut preview) = state.preview_player.take() {
-                preview.shutdown();
-            }
-            let _ = state.engine.config.save_to_file(&state.config_path);
-            state.engine.shutdown();
-            if !state.ui_font.is_null() {
-                // SAFETY: DeleteObject frees the GDI font handle created in run_windows_gui.
-                unsafe {
-                    DeleteObject(state.ui_font);
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            if let Some(mut state) = guard.take() {
+                if let Some(mut preview) = state.preview_player.take() {
+                    preview.shutdown();
+                }
+                let _ = state.engine.config.save_to_file(&state.config_path);
+                state.engine.shutdown();
+                if !state.ui_font.is_null() {
+                    // SAFETY: DeleteObject frees the GDI font handle created in run_windows_gui.
+                    unsafe {
+                        DeleteObject(state.ui_font);
+                    }
                 }
             }
         }
@@ -372,8 +380,10 @@ fn add_tray_icon(hwnd: HWND) {
     // SAFETY: Shell_NotifyIconW(NIM_ADD) registers the tray icon for `hwnd`.
     let added = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) } != 0;
     GUI_STATE.with(|cell| {
-        if let Some(state) = cell.borrow_mut().as_mut() {
-            state.tray_added = added;
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            if let Some(state) = guard.as_mut() {
+                state.tray_added = added;
+            }
         }
     });
 }
@@ -452,22 +462,24 @@ fn show_tray_context_menu(hwnd: HWND) {
         }
         IDM_TRAY_MUTE_UNMUTE => {
             GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    let display_id = selected_display_id(state);
-                    let (cur_muted, cur_vol) = state
-                        .engine
-                        .controller(&display_id)
-                        .map_or((true, 50), |c| (c.muted, c.volume));
-                    let new_muted = !cur_muted;
-                    let new_vol = if !new_muted && cur_vol == 0 {
-                        50
-                    } else {
-                        cur_vol
-                    };
-                    let _ = state
-                        .engine
-                        .set_display_audio(&display_id, new_muted, new_vol);
-                    let _ = state.engine.config.save_to_file(&state.config_path);
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        let display_id = selected_display_id(state);
+                        let (cur_muted, cur_vol) = state
+                            .engine
+                            .controller(&display_id)
+                            .map_or((true, 50), |c| (c.muted, c.volume));
+                        let new_muted = !cur_muted;
+                        let new_vol = if !new_muted && cur_vol == 0 {
+                            50
+                        } else {
+                            cur_vol
+                        };
+                        let _ = state
+                            .engine
+                            .set_display_audio(&display_id, new_muted, new_vol);
+                        let _ = state.engine.config.save_to_file(&state.config_path);
+                    }
                 }
             });
             sync_controls_from_state();
@@ -514,11 +526,13 @@ unsafe extern "system" fn window_proc(
         }
         WM_AURALIS_RELOAD_CONFIG => {
             GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    let (new_cfg, warn) = AppConfig::load_or_recover(&state.config_path);
-                    state.engine.config = new_cfg;
-                    state.last_error = warn;
-                    state.engine.restore_saved_wallpapers();
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        let (new_cfg, warn) = AppConfig::load_or_recover(&state.config_path);
+                        state.engine.config = new_cfg;
+                        state.last_error = warn;
+                        state.engine.restore_saved_wallpapers();
+                    }
                 }
             });
             sync_controls_from_state();
@@ -557,13 +571,17 @@ unsafe extern "system" fn window_proc(
                 if copied > 0 {
                     let path_str = string_from_wide(&file_buf);
                     if !path_str.is_empty() {
-                        GUI_STATE.with(|cell| {
-                            if let Some(state) = cell.borrow().as_ref() {
-                                let wide = wide_string(&path_str);
-                                // SAFETY: Populates the EDIT control with the dropped file path.
-                                unsafe { SetWindowTextW(state.edt_path, wide.as_ptr()) };
-                            }
+                        let edt_hwnd = GUI_STATE.with(|cell| {
+                            cell.try_borrow()
+                                .ok()
+                                .and_then(|g| g.as_ref().map(|s| s.edt_path))
+                                .unwrap_or(std::ptr::null_mut())
                         });
+                        if !edt_hwnd.is_null() {
+                            let wide = wide_string(&path_str);
+                            // SAFETY: Populates the EDIT control with the dropped file path outside any borrow.
+                            unsafe { SetWindowTextW(edt_hwnd, wide.as_ptr()) };
+                        }
                         start_in_app_preview(PathBuf::from(path_str));
                         update_status_readout();
                     }
@@ -572,32 +590,41 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DISPLAYCHANGE => {
+            let mut combo_hwnd = std::ptr::null_mut();
+            let mut labels = Vec::new();
             GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    let _ = state
-                        .engine
-                        .handle_event(PlatformEvent::DisplayConfigurationChanged);
-                    repopulate_display_combo(state);
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        let _ = state
+                            .engine
+                            .handle_event(PlatformEvent::DisplayConfigurationChanged);
+                        combo_hwnd = state.cmb_display;
+                        labels = build_display_combo_labels(state);
+                    }
                 }
             });
+            apply_display_combo_labels(combo_hwnd, &labels);
             sync_controls_from_state();
             update_status_readout();
             0
         }
         WM_POWERBROADCAST => {
             GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    match wparam as u32 {
-                        PBT_APMSUSPEND => {
-                            let _ = state.engine.handle_event(PlatformEvent::SystemSleepEntered);
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        match wparam as u32 {
+                            PBT_APMSUSPEND => {
+                                let _ =
+                                    state.engine.handle_event(PlatformEvent::SystemSleepEntered);
+                            }
+                            PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
+                                let _ = state.engine.handle_event(PlatformEvent::SystemWoke);
+                            }
+                            PBT_APMPOWERSTATUSCHANGE => {
+                                let _ = state.engine.evaluate_policy();
+                            }
+                            _ => {}
                         }
-                        PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
-                            let _ = state.engine.handle_event(PlatformEvent::SystemWoke);
-                        }
-                        PBT_APMPOWERSTATUSCHANGE => {
-                            let _ = state.engine.evaluate_policy();
-                        }
-                        _ => {}
                     }
                 }
             });
@@ -606,15 +633,21 @@ unsafe extern "system" fn window_proc(
         }
         WM_TIMER => {
             if wparam == ID_TIMER_TICK {
-                GUI_STATE.with(|cell| {
-                    if let Some(state) = cell.borrow_mut().as_mut() {
-                        let _ = state.engine.tick();
-                        if let Some(preview) = &mut state.preview_player {
-                            let _ = preview.tick(true);
+                let ticked = GUI_STATE.with(|cell| {
+                    if let Ok(mut guard) = cell.try_borrow_mut() {
+                        if let Some(state) = guard.as_mut() {
+                            let _ = state.engine.tick();
+                            if let Some(preview) = &mut state.preview_player {
+                                let _ = preview.tick(true);
+                            }
+                            return true;
                         }
                     }
+                    false
                 });
-                update_status_readout();
+                if ticked {
+                    update_status_readout();
+                }
             }
             0
         }
@@ -628,16 +661,12 @@ unsafe extern "system" fn window_proc(
             // AGENTS.md Principle 9: Closing the configuration window must not unexpectedly
             // stop an active wallpaper. If a wallpaper is playing, stop the in-app preview to save
             // resources and hide the window to the system tray; otherwise close and exit cleanly.
+            stop_in_app_preview();
             let has_active = GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    if let Some(mut preview) = state.preview_player.take() {
-                        preview.shutdown();
-                    }
-                    state.preview_path = None;
-                    state.engine.has_active_wallpaper()
-                } else {
-                    false
-                }
+                cell.try_borrow()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|s| s.engine.has_active_wallpaper()))
+                    .unwrap_or(false)
             });
 
             if has_active {
@@ -663,26 +692,36 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-fn repopulate_display_combo(state: &GuiState) {
-    if state.cmb_display.is_null() {
+fn build_display_combo_labels(state: &GuiState) -> Vec<String> {
+    state
+        .engine
+        .displays()
+        .iter()
+        .map(|d| {
+            let tag = if d.is_primary { " [Primary]" } else { "" };
+            format!("{} — {} ({}x{}){}", d.id, d.name, d.width, d.height, tag)
+        })
+        .collect()
+}
+
+fn apply_display_combo_labels(cmb_display: HWND, labels: &[String]) {
+    if cmb_display.is_null() {
         return;
     }
-    // SAFETY: Clears existing items in the valid combo box control.
+    // SAFETY: Clears existing items in the valid combo box control outside any RefCell borrow.
     unsafe {
-        SendMessageW(state.cmb_display, CB_RESETCONTENT, 0, 0);
+        SendMessageW(cmb_display, CB_RESETCONTENT, 0, 0);
     }
-    for d in state.engine.displays() {
-        let tag = if d.is_primary { " [Primary]" } else { "" };
-        let label = format!("{} — {} ({}x{}){}", d.id, d.name, d.width, d.height, tag);
-        let wide = wide_string(&label);
+    for label in labels {
+        let wide = wide_string(label);
         // SAFETY: Appends null-terminated UTF-16 display description to the combo box.
         unsafe {
-            SendMessageW(state.cmb_display, CB_ADDSTRING, 0, wide.as_ptr() as LPARAM);
+            SendMessageW(cmb_display, CB_ADDSTRING, 0, wide.as_ptr() as LPARAM);
         }
     }
     // SAFETY: Selects the first display item in the combo box.
     unsafe {
-        SendMessageW(state.cmb_display, CB_SETCURSEL, 0, 0);
+        SendMessageW(cmb_display, CB_SETCURSEL, 0, 0);
     }
 }
 
@@ -691,9 +730,9 @@ fn create_child_controls(parent: HWND) {
     // SAFETY: GetModuleHandleW retrieves the current process module handle.
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
     let hfont = GUI_STATE.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|s| s.ui_font)
+        cell.try_borrow()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s| s.ui_font))
             .filter(|f| !f.is_null())
             // SAFETY: GetStockObject(DEFAULT_GUI_FONT) returns the system stock GUI font handle.
             .unwrap_or_else(|| unsafe { GetStockObject(DEFAULT_GUI_FONT) })
@@ -728,7 +767,7 @@ fn create_child_controls(parent: HWND) {
 
     mk_ctrl(
         "STATIC",
-        "Auralis Live Wallpaper Studio — Native Hardware-Decoded Video Engine (Drag && Drop Video Supported)",
+        "Auralis Live Wallpaper Studio — Native Hardware-Decoded Video Engine (Drag & Drop Video Supported)",
         SS_NOPREFIX,
         20,
         14,
@@ -765,7 +804,7 @@ fn create_child_controls(parent: HWND) {
         WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
         140,
         80,
-        320,
+        310,
         28,
         ID_EDT_PATH,
     );
@@ -773,14 +812,14 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Browse Video...",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        470,
+        460,
         79,
-        110,
+        120,
         30,
         ID_BTN_BROWSE,
     );
 
-    // Note: Double ampersand `&&` escapes Win32 accelerator prefix so `&` displays literally.
+    // Note: Double ampersand `&&` escapes Win32 accelerator prefix on BUTTON controls so `&` displays literally.
     mk_ctrl(
         "BUTTON",
         "Apply && Play Wallpaper",
@@ -959,39 +998,73 @@ fn create_child_controls(parent: HWND) {
         ID_BTN_QUIT,
     );
 
+    let mut labels = Vec::new();
     GUI_STATE.with(|cell| {
-        if let Some(state) = cell.borrow_mut().as_mut() {
-            state.cmb_display = cmb_display;
-            state.edt_path = edt_path;
-            state.chk_mute = chk_mute;
-            state.chk_loop = chk_loop;
-            state.lbl_volume = lbl_volume;
-            state.chk_fullscreen = chk_fullscreen;
-            state.chk_battery = chk_battery;
-            state.chk_startup = chk_startup;
-            state.hwnd_preview = hwnd_preview;
-            state.lbl_status = lbl_status;
-            repopulate_display_combo(state);
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            if let Some(state) = guard.as_mut() {
+                state.cmb_display = cmb_display;
+                state.edt_path = edt_path;
+                state.chk_mute = chk_mute;
+                state.chk_loop = chk_loop;
+                state.lbl_volume = lbl_volume;
+                state.chk_fullscreen = chk_fullscreen;
+                state.chk_battery = chk_battery;
+                state.chk_startup = chk_startup;
+                state.hwnd_preview = hwnd_preview;
+                state.lbl_status = lbl_status;
+                labels = build_display_combo_labels(state);
+            }
         }
     });
+    apply_display_combo_labels(cmb_display, &labels);
 }
 
 fn start_in_app_preview(path: PathBuf) {
-    GUI_STATE.with(|cell| {
-        if let Some(state) = cell.borrow_mut().as_mut() {
-            if state.hwnd_preview.is_null() {
-                return;
+    let (hwnd_preview, existing_player) = GUI_STATE.with(|cell| {
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            if let Some(state) = guard.as_mut() {
+                return (state.hwnd_preview, state.preview_player.take());
             }
-            match MfVideoPlayer::create_and_play(state.hwnd_preview as isize, &path, true, 0) {
-                Ok(new_preview) => {
-                    if let Some(mut old) = state.preview_player.replace(new_preview) {
-                        old.shutdown();
+        }
+        (std::ptr::null_mut(), None)
+    });
+    if hwnd_preview.is_null() {
+        return;
+    }
+
+    // Load or create the Media Foundation preview player OUTSIDE any GUI_STATE RefCell borrow
+    // so message pumping during topology setup can never conflict with GUI_STATE.
+    let result = if let Some(mut player) = existing_player {
+        match player.load_and_play(&path, true, 0) {
+            Ok(()) => Ok(player),
+            Err(e) => {
+                // Keep the previous preview player alive if loading the new preview failed
+                GUI_STATE.with(|cell| {
+                    if let Ok(mut guard) = cell.try_borrow_mut() {
+                        if let Some(state) = guard.as_mut() {
+                            state.preview_player = Some(player);
+                        }
                     }
-                    state.preview_path = Some(path);
-                    state.last_error = None;
-                }
-                Err(e) => {
-                    state.last_error = Some(format!("In-app preview failed: {e}"));
+                });
+                Err(e)
+            }
+        }
+    } else {
+        MfVideoPlayer::create_and_play(hwnd_preview as isize, &path, true, 0)
+    };
+
+    GUI_STATE.with(|cell| {
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            if let Some(state) = guard.as_mut() {
+                match result {
+                    Ok(active_preview) => {
+                        state.preview_player = Some(active_preview);
+                        state.preview_path = Some(path);
+                        state.last_error = None;
+                    }
+                    Err(e) => {
+                        state.last_error = Some(format!("In-app preview failed: {e}"));
+                    }
                 }
             }
         }
@@ -999,14 +1072,18 @@ fn start_in_app_preview(path: PathBuf) {
 }
 
 fn stop_in_app_preview() {
-    GUI_STATE.with(|cell| {
-        if let Some(state) = cell.borrow_mut().as_mut() {
-            if let Some(mut preview) = state.preview_player.take() {
-                preview.shutdown();
+    let old_preview = GUI_STATE.with(|cell| {
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            if let Some(state) = guard.as_mut() {
+                state.preview_path = None;
+                return state.preview_player.take();
             }
-            state.preview_path = None;
         }
+        None
     });
+    if let Some(mut preview) = old_preview {
+        preview.shutdown();
+    }
 }
 
 fn selected_display_id(state: &GuiState) -> String {
@@ -1023,84 +1100,138 @@ fn selected_display_id(state: &GuiState) -> String {
 }
 
 fn sync_controls_from_state() {
-    GUI_STATE.with(|cell| {
-        if let Some(state) = cell.borrow().as_ref() {
-            let display_id = selected_display_id(state);
+    struct ControlSnapshot {
+        edt_path: HWND,
+        chk_mute: HWND,
+        chk_loop: HWND,
+        lbl_volume: HWND,
+        chk_fullscreen: HWND,
+        chk_battery: HWND,
+        chk_startup: HWND,
+        media_path: Option<String>,
+        muted: bool,
+        loop_playback: bool,
+        volume: u8,
+        pause_on_fullscreen: bool,
+        pause_on_battery: bool,
+        launch_at_startup: bool,
+    }
 
-            if let Some(cfg) = state.engine.config.per_display.get(&display_id).or(state
-                .engine
-                .config
-                .default_wallpaper
-                .as_ref())
-            {
-                let wide_path = wide_string(&cfg.media_path.to_string_lossy());
-                // SAFETY: Updates the EDIT box text with a valid null-terminated UTF-16 string.
-                unsafe { SetWindowTextW(state.edt_path, wide_path.as_ptr()) };
-            }
+    let snapshot = GUI_STATE.with(|cell| {
+        let Ok(guard) = cell.try_borrow() else {
+            return None;
+        };
+        let state = guard.as_ref()?;
+        let display_id = selected_display_id(state);
+        let media_path = state
+            .engine
+            .config
+            .per_display
+            .get(&display_id)
+            .or(state.engine.config.default_wallpaper.as_ref())
+            .map(|cfg| cfg.media_path.to_string_lossy().to_string());
 
-            let (muted, loop_playback, volume) = state
-                .engine
-                .controller(&display_id)
-                .map(|c| (c.muted, c.loop_playback, c.volume))
-                .unwrap_or((true, true, 0));
+        let (muted, loop_playback, volume) = state
+            .engine
+            .controller(&display_id)
+            .map(|c| (c.muted, c.loop_playback, c.volume))
+            .unwrap_or((true, true, 0));
 
-            // SAFETY: Updates checkbox states and volume label text on valid child control handles.
-            unsafe {
-                SendMessageW(
-                    state.chk_mute,
-                    BM_SETCHECK,
-                    if muted { BST_CHECKED } else { BST_UNCHECKED },
-                    0,
-                );
-                SendMessageW(
-                    state.chk_loop,
-                    BM_SETCHECK,
-                    if loop_playback {
-                        BST_CHECKED
-                    } else {
-                        BST_UNCHECKED
-                    },
-                    0,
-                );
-                SendMessageW(
-                    state.chk_fullscreen,
-                    BM_SETCHECK,
-                    if state.engine.config.pause_on_fullscreen {
-                        BST_CHECKED
-                    } else {
-                        BST_UNCHECKED
-                    },
-                    0,
-                );
-                SendMessageW(
-                    state.chk_battery,
-                    BM_SETCHECK,
-                    if state.engine.config.pause_on_battery {
-                        BST_CHECKED
-                    } else {
-                        BST_UNCHECKED
-                    },
-                    0,
-                );
-                SendMessageW(
-                    state.chk_startup,
-                    BM_SETCHECK,
-                    if state.engine.config.launch_at_startup {
-                        BST_CHECKED
-                    } else {
-                        BST_UNCHECKED
-                    },
-                    0,
-                );
-
-                let vol_txt = wide_string(&format!("Volume: {volume}%"));
-                SetWindowTextW(state.lbl_volume, vol_txt.as_ptr());
-            }
-        }
+        Some(ControlSnapshot {
+            edt_path: state.edt_path,
+            chk_mute: state.chk_mute,
+            chk_loop: state.chk_loop,
+            lbl_volume: state.lbl_volume,
+            chk_fullscreen: state.chk_fullscreen,
+            chk_battery: state.chk_battery,
+            chk_startup: state.chk_startup,
+            media_path,
+            muted,
+            loop_playback,
+            volume,
+            pause_on_fullscreen: state.engine.config.pause_on_fullscreen,
+            pause_on_battery: state.engine.config.pause_on_battery,
+            launch_at_startup: state.engine.config.launch_at_startup,
+        })
     });
+
+    let Some(snap) = snapshot else {
+        return;
+    };
+
+    // Perform all Win32 SetWindowTextW / SendMessageW calls outside the GUI_STATE borrow
+    // so any synchronous child notifications (like EN_CHANGE) never collide with a held borrow.
+    if let Some(path_str) = snap.media_path {
+        let current_edit = read_edit_text(snap.edt_path);
+        if current_edit != path_str {
+            let wide_path = wide_string(&path_str);
+            // SAFETY: Updates the EDIT box text with a valid null-terminated UTF-16 string.
+            unsafe { SetWindowTextW(snap.edt_path, wide_path.as_ptr()) };
+        }
+    }
+
+    // SAFETY: Updates checkbox states and volume label text on valid child control handles.
+    unsafe {
+        SendMessageW(
+            snap.chk_mute,
+            BM_SETCHECK,
+            if snap.muted {
+                BST_CHECKED
+            } else {
+                BST_UNCHECKED
+            },
+            0,
+        );
+        SendMessageW(
+            snap.chk_loop,
+            BM_SETCHECK,
+            if snap.loop_playback {
+                BST_CHECKED
+            } else {
+                BST_UNCHECKED
+            },
+            0,
+        );
+        SendMessageW(
+            snap.chk_fullscreen,
+            BM_SETCHECK,
+            if snap.pause_on_fullscreen {
+                BST_CHECKED
+            } else {
+                BST_UNCHECKED
+            },
+            0,
+        );
+        SendMessageW(
+            snap.chk_battery,
+            BM_SETCHECK,
+            if snap.pause_on_battery {
+                BST_CHECKED
+            } else {
+                BST_UNCHECKED
+            },
+            0,
+        );
+        SendMessageW(
+            snap.chk_startup,
+            BM_SETCHECK,
+            if snap.launch_at_startup {
+                BST_CHECKED
+            } else {
+                BST_UNCHECKED
+            },
+            0,
+        );
+
+        let vol_txt = wide_string(&format!("Volume: {}%", snap.volume));
+        SetWindowTextW(snap.lbl_volume, vol_txt.as_ptr());
+    }
 }
 
 fn read_edit_text(hwnd_edit: HWND) -> String {
+    if hwnd_edit.is_null() {
+        return String::new();
+    }
     // SAFETY: Queries the length of the EDIT box text and copies UTF-16 characters into buffer.
     unsafe {
         let len = GetWindowTextLengthW(hwnd_edit);
@@ -1153,35 +1284,43 @@ fn handle_command(hwnd: HWND, control_id: usize, notify_code: usize) {
         }
         ID_BTN_BROWSE => {
             if let Some(chosen) = browse_video_file(hwnd) {
-                GUI_STATE.with(|cell| {
-                    if let Some(state) = cell.borrow().as_ref() {
-                        let wide = wide_string(&chosen.to_string_lossy());
-                        // SAFETY: Sets the selected file path into the valid EDIT control.
-                        unsafe { SetWindowTextW(state.edt_path, wide.as_ptr()) };
-                    }
+                let edt_hwnd = GUI_STATE.with(|cell| {
+                    cell.try_borrow()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|s| s.edt_path))
+                        .unwrap_or(std::ptr::null_mut())
                 });
+                if !edt_hwnd.is_null() {
+                    let wide = wide_string(&chosen.to_string_lossy());
+                    // SAFETY: Sets the selected file path into the valid EDIT control outside any borrow.
+                    unsafe { SetWindowTextW(edt_hwnd, wide.as_ptr()) };
+                }
                 start_in_app_preview(chosen);
                 update_status_readout();
             }
         }
         ID_BTN_PREVIEW => {
             let path_opt = GUI_STATE.with(|cell| {
-                cell.borrow().as_ref().and_then(|state| {
-                    let txt = read_edit_text(state.edt_path);
-                    if txt.trim().is_empty() {
-                        None
-                    } else {
-                        Some(PathBuf::from(txt.trim()))
-                    }
+                cell.try_borrow().ok().and_then(|g| {
+                    g.as_ref().and_then(|state| {
+                        let txt = read_edit_text(state.edt_path);
+                        if txt.trim().is_empty() {
+                            None
+                        } else {
+                            Some(PathBuf::from(txt.trim()))
+                        }
+                    })
                 })
             });
             if let Some(p) = path_opt {
                 start_in_app_preview(p);
             } else {
                 GUI_STATE.with(|cell| {
-                    if let Some(state) = cell.borrow_mut().as_mut() {
-                        state.last_error =
-                            Some("Select or enter a video file path to preview.".to_string());
+                    if let Ok(mut guard) = cell.try_borrow_mut() {
+                        if let Some(state) = guard.as_mut() {
+                            state.last_error =
+                                Some("Select or enter a video file path to preview.".to_string());
+                        }
                     }
                 });
             }
@@ -1193,24 +1332,26 @@ fn handle_command(hwnd: HWND, control_id: usize, notify_code: usize) {
         }
         ID_BTN_APPLY => {
             GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    let display_id = selected_display_id(state);
-                    let path_text = read_edit_text(state.edt_path);
-                    if path_text.trim().is_empty() {
-                        state.last_error =
-                            Some("Please select or enter a valid video file path.".to_string());
-                        return;
-                    }
-                    match state
-                        .engine
-                        .apply_wallpaper(&display_id, PathBuf::from(path_text.trim()))
-                    {
-                        Ok(()) => {
-                            state.last_error = None;
-                            let _ = state.engine.config.save_to_file(&state.config_path);
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        let display_id = selected_display_id(state);
+                        let path_text = read_edit_text(state.edt_path);
+                        if path_text.trim().is_empty() {
+                            state.last_error =
+                                Some("Please select or enter a valid video file path.".to_string());
+                            return;
                         }
-                        Err(err) => {
-                            state.last_error = Some(err);
+                        match state
+                            .engine
+                            .apply_wallpaper(&display_id, PathBuf::from(path_text.trim()))
+                        {
+                            Ok(()) => {
+                                state.last_error = None;
+                                let _ = state.engine.config.save_to_file(&state.config_path);
+                            }
+                            Err(err) => {
+                                state.last_error = Some(err);
+                            }
                         }
                     }
                 }
@@ -1220,21 +1361,23 @@ fn handle_command(hwnd: HWND, control_id: usize, notify_code: usize) {
         }
         ID_BTN_PAUSE_RESUME => {
             GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    let display_id = selected_display_id(state);
-                    let is_playing = state
-                        .engine
-                        .controller(&display_id)
-                        .is_some_and(|c| matches!(c.state, PlaybackState::Playing { .. }));
-                    let res = if is_playing {
-                        state.engine.pause_display(&display_id)
-                    } else {
-                        state.engine.resume_display(&display_id)
-                    };
-                    if let Err(e) = res {
-                        state.last_error = Some(e.to_string());
-                    } else {
-                        state.last_error = None;
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        let display_id = selected_display_id(state);
+                        let is_playing = state
+                            .engine
+                            .controller(&display_id)
+                            .is_some_and(|c| matches!(c.state, PlaybackState::Playing { .. }));
+                        let res = if is_playing {
+                            state.engine.pause_display(&display_id)
+                        } else {
+                            state.engine.resume_display(&display_id)
+                        };
+                        if let Err(e) = res {
+                            state.last_error = Some(e.to_string());
+                        } else {
+                            state.last_error = None;
+                        }
                     }
                 }
             });
@@ -1242,92 +1385,98 @@ fn handle_command(hwnd: HWND, control_id: usize, notify_code: usize) {
         }
         ID_BTN_STOP => {
             GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    let display_id = selected_display_id(state);
-                    let _ = state.engine.stop_display(&display_id);
-                    state.last_error = None;
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        let display_id = selected_display_id(state);
+                        let _ = state.engine.stop_display(&display_id);
+                        state.last_error = None;
+                    }
                 }
             });
             update_status_readout();
         }
         ID_CHK_MUTE | ID_BTN_VOL_DOWN | ID_BTN_VOL_UP => {
             GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    let display_id = selected_display_id(state);
-                    // SAFETY: Queries the current check state of the mute checkbox control.
-                    let checked = unsafe { SendMessageW(state.chk_mute, BM_GETCHECK, 0, 0) }
-                        == BST_CHECKED as isize;
-                    let cur_vol = state.engine.controller(&display_id).map_or(0, |c| c.volume);
-                    let new_vol = match control_id {
-                        ID_BTN_VOL_DOWN => cur_vol.saturating_sub(10),
-                        ID_BTN_VOL_UP => (cur_vol + 10).min(100),
-                        _ => cur_vol,
-                    };
-                    let new_mute = if control_id == ID_BTN_VOL_UP && new_vol > 0 && checked {
-                        // SAFETY: Unchecks the mute checkbox when the user explicitly raises volume above 0.
-                        unsafe {
-                            SendMessageW(state.chk_mute, BM_SETCHECK, BST_UNCHECKED, 0);
-                        }
-                        false
-                    } else {
-                        checked
-                    };
-                    let _ = state
-                        .engine
-                        .set_display_audio(&display_id, new_mute, new_vol);
-                    let _ = state.engine.config.save_to_file(&state.config_path);
-                    let vol_txt = wide_string(&format!("Volume: {new_vol}%"));
-                    // SAFETY: Updates the volume label text with a null-terminated UTF-16 string.
-                    unsafe { SetWindowTextW(state.lbl_volume, vol_txt.as_ptr()) };
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        let display_id = selected_display_id(state);
+                        // SAFETY: Queries the current check state of the mute checkbox control.
+                        let checked = unsafe { SendMessageW(state.chk_mute, BM_GETCHECK, 0, 0) }
+                            == BST_CHECKED as isize;
+                        let cur_vol = state.engine.controller(&display_id).map_or(0, |c| c.volume);
+                        let new_vol = match control_id {
+                            ID_BTN_VOL_DOWN => cur_vol.saturating_sub(10),
+                            ID_BTN_VOL_UP => (cur_vol + 10).min(100),
+                            _ => cur_vol,
+                        };
+                        let new_mute = if control_id == ID_BTN_VOL_UP && new_vol > 0 && checked {
+                            false
+                        } else {
+                            checked
+                        };
+                        let _ = state
+                            .engine
+                            .set_display_audio(&display_id, new_mute, new_vol);
+                        let _ = state.engine.config.save_to_file(&state.config_path);
+                    }
                 }
             });
+            sync_controls_from_state();
             update_status_readout();
         }
         ID_CHK_LOOP => {
             GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    let display_id = selected_display_id(state);
-                    // SAFETY: Queries the current check state of the loop checkbox control.
-                    let checked = unsafe { SendMessageW(state.chk_loop, BM_GETCHECK, 0, 0) }
-                        == BST_CHECKED as isize;
-                    state.engine.set_display_loop(&display_id, checked);
-                    let _ = state.engine.config.save_to_file(&state.config_path);
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        let display_id = selected_display_id(state);
+                        // SAFETY: Queries the current check state of the loop checkbox control.
+                        let checked = unsafe { SendMessageW(state.chk_loop, BM_GETCHECK, 0, 0) }
+                            == BST_CHECKED as isize;
+                        state.engine.set_display_loop(&display_id, checked);
+                        let _ = state.engine.config.save_to_file(&state.config_path);
+                    }
                 }
             });
             update_status_readout();
         }
         ID_CHK_FULLSCREEN | ID_CHK_BATTERY => {
             GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    // SAFETY: Queries the current check state of the full-screen policy checkbox.
-                    let fs_checked =
-                        unsafe { SendMessageW(state.chk_fullscreen, BM_GETCHECK, 0, 0) }
-                            == BST_CHECKED as isize;
-                    // SAFETY: Queries the current check state of the battery policy checkbox.
-                    let bat_checked = unsafe { SendMessageW(state.chk_battery, BM_GETCHECK, 0, 0) }
-                        == BST_CHECKED as isize;
-                    state.engine.config.pause_on_fullscreen = fs_checked;
-                    state.engine.config.pause_on_battery = bat_checked;
-                    let _ = state.engine.config.save_to_file(&state.config_path);
-                    let _ = state.engine.evaluate_policy();
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        // SAFETY: Queries the current check state of the full-screen policy checkbox.
+                        let fs_checked =
+                            unsafe { SendMessageW(state.chk_fullscreen, BM_GETCHECK, 0, 0) }
+                                == BST_CHECKED as isize;
+                        // SAFETY: Queries the current check state of the battery policy checkbox.
+                        let bat_checked =
+                            unsafe { SendMessageW(state.chk_battery, BM_GETCHECK, 0, 0) }
+                                == BST_CHECKED as isize;
+                        state.engine.config.pause_on_fullscreen = fs_checked;
+                        state.engine.config.pause_on_battery = bat_checked;
+                        let _ = state.engine.config.save_to_file(&state.config_path);
+                        let _ = state.engine.evaluate_policy();
+                    }
                 }
             });
             update_status_readout();
         }
         ID_CHK_STARTUP => {
             GUI_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    // SAFETY: Queries the current check state of the Windows login startup checkbox.
-                    let startup_checked =
-                        unsafe { SendMessageW(state.chk_startup, BM_GETCHECK, 0, 0) }
-                            == BST_CHECKED as isize;
-                    match state.engine.set_launch_at_startup(startup_checked) {
-                        Ok(()) => {
-                            state.last_error = None;
-                            let _ = state.engine.config.save_to_file(&state.config_path);
-                        }
-                        Err(e) => {
-                            state.last_error = Some(format!("Startup registration failed: {e}"));
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        // SAFETY: Queries the current check state of the Windows login startup checkbox.
+                        let startup_checked =
+                            unsafe { SendMessageW(state.chk_startup, BM_GETCHECK, 0, 0) }
+                                == BST_CHECKED as isize;
+                        match state.engine.set_launch_at_startup(startup_checked) {
+                            Ok(()) => {
+                                state.last_error = None;
+                                let _ = state.engine.config.save_to_file(&state.config_path);
+                            }
+                            Err(e) => {
+                                state.last_error =
+                                    Some(format!("Startup registration failed: {e}"));
+                            }
                         }
                     }
                 }
@@ -1357,98 +1506,126 @@ fn format_mm_ss(ms: u64) -> String {
 }
 
 fn update_status_readout() {
-    GUI_STATE.with(|cell| {
-        if let Some(state) = cell.borrow_mut().as_mut() {
-            let display_id = selected_display_id(state);
-            let state_desc = match state.engine.controller(&display_id).map(|c| &c.state) {
-                Some(PlaybackState::Playing { path, .. }) => {
-                    format!("PLAYING ({})", path.display())
-                }
-                Some(PlaybackState::Paused { path, .. }) => {
-                    format!("PAUSED ({})", path.display())
-                }
-                Some(PlaybackState::Stopped { .. }) => "STOPPED".to_string(),
-                Some(PlaybackState::Loading { path }) => {
-                    format!("LOADING ({})", path.display())
-                }
-                Some(PlaybackState::Failed { error, .. }) => format!("FAILED: {error}"),
-                _ => "IDLE (Select or drop a video file and click 'Apply & Play Wallpaper')"
-                    .to_string(),
-            };
+    let update_target: Option<(HWND, String)> = GUI_STATE.with(|cell| {
+        let Ok(mut guard) = cell.try_borrow_mut() else {
+            return None;
+        };
+        let state = guard.as_mut()?;
 
-            let hwnd_desc = state
-                .engine
-                .host_window(&display_id)
-                .map_or_else(|| "Detached".to_string(), |h| format!("WorkerW HWND 0x{h:X}"));
-
-            let video_meta = if let Some(tel) = state.engine.video_telemetry(&display_id) {
-                let res_str = tel
-                    .native_resolution
-                    .map_or_else(|| "Auto".to_string(), |(w, h)| format!("{w}x{h}"));
-                let time_str = match (tel.position_ms, tel.duration_ms) {
-                    (Some(pos), Some(dur)) if dur > 0 => {
-                        format!("{} / {}", format_mm_ss(pos), format_mm_ss(dur))
-                    }
-                    _ => "Live".to_string(),
-                };
-                format!("Video: {res_str} ({time_str})")
-            } else {
-                "Video: Inactive".to_string()
-            };
-
-            let power_desc = match state.engine.query_power_status() {
-                Ok(PowerStatus::OnAcPower) => "AC Mains".to_string(),
-                Ok(PowerStatus::OnBattery {
-                    percent,
-                    battery_saver,
-                }) => {
-                    let pct = percent.map_or_else(|| "?%".to_string(), |p| format!("{p}%"));
-                    format!("Battery ({pct}, Saver: {battery_saver})")
-                }
-                _ => "Unknown".to_string(),
-            };
-
-            let perf_desc = if let Some(metrics) = state.engine.process_metrics() {
-                let ram_mb = (metrics.working_set_bytes as f64) / (1024.0 * 1024.0);
-                let cpu_sec = (metrics.cpu_time_ms as f64) / 1000.0;
-                format!("RAM: {ram_mb:.1} MB | CPU Time: {cpu_sec:.2}s")
-            } else {
-                "RAM: N/A".to_string()
-            };
-
-            let preview_desc = if let Some(p) = &state.preview_path {
-                let fname = p
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "active".to_string());
-                format!("Previewing '{fname}'")
-            } else {
-                "Preview Idle".to_string()
-            };
-
-            let tray_hint = if state.tray_added {
-                "System Tray Icon Active (Right-click tray icon for quick controls)."
-            } else {
-                "Closing or hiding this window keeps your active wallpaper playing."
-            };
-
-            let status_line = if let Some(err) = &state.last_error {
-                format!(
-                    "Status: {state_desc}\r\nLayering: {hwnd_desc} | {video_meta} | {preview_desc}\r\nPower: {power_desc} | Measured Resource Usage: {perf_desc}\r\nNotice: {err}"
-                )
-            } else {
-                format!(
-                    "Status: {state_desc}\r\nLayering: {hwnd_desc} | {video_meta} | {preview_desc}\r\nPower: {power_desc} | Measured Resource Usage: {perf_desc}\r\nTip: {tray_hint}"
-                )
-            };
-
-            // Only call SetWindowTextW when the status string actually changes to prevent UI flicker
-            if status_line != state.last_status_text {
-                state.last_status_text.clone_from(&status_line);
-                let wide = wide_string(&status_line);
-                // SAFETY: Updates the status STATIC control text with a null-terminated UTF-16 string.
-                unsafe { SetWindowTextW(state.lbl_status, wide.as_ptr()) };
+        let display_id = selected_display_id(state);
+        let state_desc = match state.engine.controller(&display_id).map(|c| &c.state) {
+            Some(PlaybackState::Playing { path, .. }) => {
+                format!("PLAYING ({})", path.display())
             }
+            Some(PlaybackState::Paused { path, .. }) => {
+                format!("PAUSED ({})", path.display())
+            }
+            Some(PlaybackState::Stopped { .. }) => "STOPPED".to_string(),
+            Some(PlaybackState::Loading { path }) => {
+                format!("LOADING ({})", path.display())
+            }
+            Some(PlaybackState::Failed { error, .. }) => format!("FAILED: {error}"),
+            _ => "IDLE (Select or drop a video file and click 'Apply & Play Wallpaper')"
+                .to_string(),
+        };
+
+        let hwnd_desc = state
+            .engine
+            .host_window(&display_id)
+            .map_or_else(|| "Detached".to_string(), |h| format!("WorkerW HWND 0x{h:X}"));
+
+        let video_meta = if let Some(tel) = state.engine.video_telemetry(&display_id) {
+            let res_str = tel
+                .native_resolution
+                .map_or_else(|| "Auto".to_string(), |(w, h)| format!("{w}x{h}"));
+            let time_str = match (tel.position_ms, tel.duration_ms) {
+                (Some(pos), Some(dur)) if dur > 0 => {
+                    format!("{} / {}", format_mm_ss(pos), format_mm_ss(dur))
+                }
+                _ => "Live".to_string(),
+            };
+            format!("Video: {res_str} ({time_str})")
+        } else {
+            "Video: Inactive".to_string()
+        };
+
+        let power_desc = match state.engine.query_power_status() {
+            Ok(PowerStatus::OnAcPower) => "AC Mains".to_string(),
+            Ok(PowerStatus::OnBattery {
+                percent,
+                battery_saver,
+            }) => {
+                let pct = percent.map_or_else(|| "?%".to_string(), |p| format!("{p}%"));
+                format!("Battery ({pct}, Saver: {battery_saver})")
+            }
+            _ => "Unknown".to_string(),
+        };
+
+        let perf_desc = if let Some(metrics) = state.engine.process_metrics() {
+            let ram_mb = (metrics.working_set_bytes as f64) / (1024.0 * 1024.0);
+            let cpu_sec = (metrics.cpu_time_ms as f64) / 1000.0;
+            format!("RAM: {ram_mb:.1} MB | CPU Time: {cpu_sec:.2}s")
+        } else {
+            "RAM: N/A".to_string()
+        };
+
+        let preview_desc = if let Some(p) = &state.preview_path {
+            let fname = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "active".to_string());
+            format!("Previewing '{fname}'")
+        } else {
+            "Preview Idle".to_string()
+        };
+
+        let tray_hint = if state.tray_added {
+            "System Tray Icon Active (Right-click tray icon for quick controls)."
+        } else {
+            "Closing or hiding this window keeps your active wallpaper playing."
+        };
+
+        let status_line = if let Some(err) = &state.last_error {
+            format!(
+                "Status: {state_desc}\r\nLayering: {hwnd_desc} | {video_meta} | {preview_desc}\r\nPower: {power_desc} | Measured Resource Usage: {perf_desc}\r\nNotice: {err}"
+            )
+        } else {
+            format!(
+                "Status: {state_desc}\r\nLayering: {hwnd_desc} | {video_meta} | {preview_desc}\r\nPower: {power_desc} | Measured Resource Usage: {perf_desc}\r\nTip: {tray_hint}"
+            )
+        };
+
+        if status_line != state.last_status_text {
+            state.last_status_text.clone_from(&status_line);
+            Some((state.lbl_status, status_line))
+        } else {
+            None
         }
     });
+
+    if let Some((lbl_hwnd, status_line)) = update_target {
+        if !lbl_hwnd.is_null() {
+            let wide = wide_string(&status_line);
+            // SAFETY: Updates the status STATIC control text outside any RefCell borrow.
+            unsafe { SetWindowTextW(lbl_hwnd, wide.as_ptr()) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reentrant_gui_state_does_not_panic() {
+        // Verify that calling update_status_readout() and sync_controls_from_state()
+        // while GUI_STATE is already mutably borrowed never panics (regression test for
+        // Win32 WM_TIMER / SetMediaItem message-pump re-entrancy).
+        GUI_STATE.with(|cell| {
+            let _held_guard = cell.try_borrow_mut().unwrap();
+            sync_controls_from_state();
+            update_status_readout();
+            stop_in_app_preview();
+        });
+    }
 }

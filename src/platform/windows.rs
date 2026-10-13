@@ -713,11 +713,11 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         muted: bool,
         volume: u8,
     ) -> Result<(), PlatformError> {
-        // Create new player first so if Media Foundation rejects the file, the previous player stays alive
-        let new_player = MfVideoPlayer::create_and_play(window_hwnd, path, muted, volume)?;
-        if let Some(mut old_player) = self.players.insert(window_hwnd, new_player) {
-            old_player.shutdown();
+        if let Some(existing_player) = self.players.get_mut(&window_hwnd) {
+            return existing_player.load_and_play(path, muted, volume);
         }
+        let new_player = MfVideoPlayer::create_and_play(window_hwnd, path, muted, volume)?;
+        self.players.insert(window_hwnd, new_player);
         Ok(())
     }
 
