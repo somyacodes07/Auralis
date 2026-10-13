@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "auralis"
-version = "0.1.0-alpha.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",

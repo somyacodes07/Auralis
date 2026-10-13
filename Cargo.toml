@@ -1,12 +1,12 @@
 [package]
 name = "auralis"
-version = "0.1.0-alpha.0"
+version = "0.1.0-beta.1"
 edition = "2021"
-authors = ["Auralis Team"]
+authors = ["somyacodes07 <ffsomyajeet@gmail.com>"]
 description = "A premium, Rust-first live wallpaper application for macOS and Windows"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ssgamingop/Auralis"
+repository = "https://github.com/somyacodes07/Auralis"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -17,10 +17,12 @@ version = "0.59"
 features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls_Dialogs",
     "Win32_Graphics_Gdi",
     "Win32_System_Power",
     "Win32_System_LibraryLoader",
     "Win32_System_StationsAndDesktops",
+    "Win32_System_Com",
 ]
 
 [dev-dependencies]

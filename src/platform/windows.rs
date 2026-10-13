@@ -4,8 +4,11 @@
 //! Progman / WorkerW message pump architecture, multi-display monitor enumeration,
 //! system power state inspection, and full-screen application occlusion detection.
 
+use super::windows_player::MfVideoPlayer;
 use super::{DisplayInfo, PlatformAdapter, PlatformError, PowerStatus};
+use std::collections::HashMap;
 use std::mem;
+use std::path::Path;
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
@@ -28,12 +31,14 @@ const WM_SPAWN_WORKERW: u32 = 0x052C;
 /// Desired access rights for opening the interactive Default desktop (`DESKTOP_ALL_ACCESS`).
 const DESKTOP_ACCESS_ALL: u32 = 0x01FF;
 
-/// Native Windows wallpaper layering adapter.
-#[derive(Debug, Clone, Default)]
+/// Native Windows wallpaper layering and Media Foundation playback adapter.
+#[derive(Debug, Default)]
 pub struct WindowsPlatformAdapter {
     /// Window handle of the WorkerW window behind desktop icons.
     /// Stored as an integer handle to remain thread-safe (`Send + Sync`).
     workerw_handle: Option<isize>,
+    /// Active Media Foundation video players keyed by wallpaper host window handle (`HWND`).
+    players: HashMap<isize, MfVideoPlayer>,
 }
 
 impl WindowsPlatformAdapter {
@@ -43,6 +48,7 @@ impl WindowsPlatformAdapter {
         Self::ensure_interactive_desktop();
         Self {
             workerw_handle: None,
+            players: HashMap::new(),
         }
     }
 
@@ -397,6 +403,10 @@ impl PlatformAdapter for WindowsPlatformAdapter {
     }
 
     fn destroy_wallpaper_host_window(&mut self, window_hwnd: isize) -> Result<(), PlatformError> {
+        if let Some(mut player) = self.players.remove(&window_hwnd) {
+            player.shutdown();
+        }
+
         let hwnd = window_hwnd as HWND;
         if hwnd.is_null() {
             return Ok(());
@@ -444,15 +454,74 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         unsafe { SetParent(child_hwnd, std::ptr::null_mut()) };
         Ok(())
     }
+
+    fn start_video_playback(
+        &mut self,
+        window_hwnd: isize,
+        path: &Path,
+        muted: bool,
+        volume: u8,
+    ) -> Result<(), PlatformError> {
+        // Create new player first so if Media Foundation rejects the file, the previous player stays alive
+        let new_player = MfVideoPlayer::create_and_play(window_hwnd, path, muted, volume)?;
+        if let Some(mut old_player) = self.players.insert(window_hwnd, new_player) {
+            old_player.shutdown();
+        }
+        Ok(())
+    }
+
+    fn pause_video_playback(&mut self, window_hwnd: isize) -> Result<(), PlatformError> {
+        if let Some(player) = self.players.get(&window_hwnd) {
+            player.pause()?;
+        }
+        Ok(())
+    }
+
+    fn resume_video_playback(&mut self, window_hwnd: isize) -> Result<(), PlatformError> {
+        if let Some(player) = self.players.get(&window_hwnd) {
+            player.play()?;
+        }
+        Ok(())
+    }
+
+    fn stop_video_playback(&mut self, window_hwnd: isize) -> Result<(), PlatformError> {
+        if let Some(mut player) = self.players.remove(&window_hwnd) {
+            player.shutdown();
+        }
+        Ok(())
+    }
+
+    fn set_video_audio(
+        &mut self,
+        window_hwnd: isize,
+        muted: bool,
+        volume: u8,
+    ) -> Result<(), PlatformError> {
+        if let Some(player) = self.players.get(&window_hwnd) {
+            player.set_audio(muted, volume)?;
+        }
+        Ok(())
+    }
+
+    fn tick_video_playback(
+        &mut self,
+        window_hwnd: isize,
+        loop_playback: bool,
+    ) -> Result<(), PlatformError> {
+        if let Some(player) = self.players.get(&window_hwnd) {
+            player.tick(loop_playback)?;
+        }
+        Ok(())
+    }
 }
 
 /// Converts a Rust string slice to a null-terminated UTF-16 wide string.
-fn wide_string(s: &str) -> Vec<u16> {
+pub(crate) fn wide_string(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// Converts a null-terminated UTF-16 slice to a Rust String.
-fn string_from_wide(slice: &[u16]) -> String {
+pub(crate) fn string_from_wide(slice: &[u16]) -> String {
     let len = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
     String::from_utf16_lossy(&slice[..len])
 }

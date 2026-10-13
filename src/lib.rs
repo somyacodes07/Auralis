@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn test_version_not_empty() {
         assert!(!VERSION.is_empty());
-        assert_eq!(VERSION, "0.1.0-alpha.0");
+        assert_eq!(VERSION, "0.1.0-beta.1");
     }
 
     #[test]

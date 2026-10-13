@@ -112,11 +112,11 @@ jobs:
           find release-artifacts -type f -exec cp {} final-dist/ \;
           ls -la final-dist/
 
-      - name: Create Draft Release
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
-          prerelease: contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta')
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
           files: final-dist/*
           body: |
             ## Auralis Release ${{ github.ref_name }}

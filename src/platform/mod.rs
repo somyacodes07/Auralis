@@ -4,9 +4,14 @@
 //! Shared code does not depend on AppKit, Objective-C, or Windows-specific raw pointers.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
+#[cfg(target_os = "windows")]
+pub mod windows_gui;
+#[cfg(target_os = "windows")]
+pub mod windows_player;
 
 /// Information about a detected display monitor, including virtual desktop coordinates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +71,8 @@ pub enum PlatformError {
     DisplayEnumerationFailed(String),
     /// Failed to query system power state.
     PowerQueryFailed(String),
+    /// Native hardware media decoder or renderer failed.
+    MediaPlaybackFailed(String),
     /// Operating system is not supported for desktop wallpaper layering.
     UnsupportedPlatform,
 }
@@ -85,6 +92,7 @@ impl std::fmt::Display for PlatformError {
             }
             Self::DisplayEnumerationFailed(msg) => write!(f, "Display enumeration failed: {msg}"),
             Self::PowerQueryFailed(msg) => write!(f, "System power status query failed: {msg}"),
+            Self::MediaPlaybackFailed(msg) => write!(f, "Native video playback failed: {msg}"),
             Self::UnsupportedPlatform => {
                 write!(
                     f,
@@ -98,7 +106,7 @@ impl std::fmt::Display for PlatformError {
 impl std::error::Error for PlatformError {}
 
 /// Abstract platform adapter interface for wallpaper window lifecycle, display management,
-/// and system state inspection.
+/// native video playback, and system state inspection.
 pub trait PlatformAdapter: Send + Sync {
     /// Enumerate all currently connected and active displays.
     fn enumerate_displays(&self) -> Result<Vec<DisplayInfo>, PlatformError>;
@@ -132,6 +140,51 @@ pub trait PlatformAdapter: Send + Sync {
         display_id: &str,
         window_hwnd: isize,
     ) -> Result<(), PlatformError>;
+
+    /// Start hardware-accelerated video playback inside the specified wallpaper host window.
+    fn start_video_playback(
+        &mut self,
+        _window_hwnd: isize,
+        _path: &Path,
+        _muted: bool,
+        _volume: u8,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    /// Pause native video playback on the specified wallpaper host window.
+    fn pause_video_playback(&mut self, _window_hwnd: isize) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    /// Resume native video playback on the specified wallpaper host window.
+    fn resume_video_playback(&mut self, _window_hwnd: isize) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    /// Stop and unload native video playback on the specified wallpaper host window.
+    fn stop_video_playback(&mut self, _window_hwnd: isize) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    /// Update audio mute and volume (`0..=100`) on the specified wallpaper host window.
+    fn set_video_audio(
+        &mut self,
+        _window_hwnd: isize,
+        _muted: bool,
+        _volume: u8,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    /// Periodic playback tick to handle seamless looping and video surface updates.
+    fn tick_video_playback(
+        &mut self,
+        _window_hwnd: isize,
+        _loop_playback: bool,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
 }
 
 /// Factory function to create the appropriate platform adapter for the current host OS.

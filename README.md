@@ -1,35 +1,44 @@
 # Auralis
 
-A premium, Rust-first live wallpaper application targeting **macOS** and **Windows**.
+A premium, Rust-first live wallpaper application targeting **Windows** and **macOS**.
 
-## Mission & Architecture
+## Features (`v0.1.0-beta.1`)
 
-Auralis delivers a reliable, smooth video wallpaper experience behind desktop icons and application windows:
-- **Rust-First Core**: Shared application state, configuration (`src/config.rs`), playback controller (`src/media/`), and multi-display engine orchestrator (`src/engine.rs`).
-- **Native Bridges**: Clean, decoupled platform adapters (`src/platform/` — AVFoundation on macOS, Media Foundation & `Progman`/`WorkerW` on Windows).
+- **Native Hardware-Decoded Video Wallpapers (Windows)**: Renders `.mp4`, `.mov`, `.mkv`, `.webm`, and `.m4v` videos directly behind desktop icons (`Progman`/`WorkerW`) using Windows Media Foundation (`mfplay.dll` / `IMFPMediaPlayer`).
+- **Native Configuration Studio UI**: Launch `auralis.exe` (or `cargo run`) to open the native Windows Configuration Studio with monitor selection, file browser dialog, live playback/audio/loop controls, and real-time telemetry.
+- **Resilient Runtime**: Closing or hiding the configuration window keeps your live wallpaper playing in the background. Failed media replacements automatically preserve your previous working wallpaper.
+- **Smart Power & Full-Screen Policies**: Automatically pauses video playback when a full-screen application/game occludes the monitor or when the system switches to battery power.
 - **Multi-Agent Engineering**: Built collaboratively with **Antigravity** (primary implementation agent) and **Freebuff** (independent verification agent via [`knowledge.md`](knowledge.md)).
 
 For detailed engineering guidelines, see [AGENTS.md](AGENTS.md) and [docs/MULTI_AGENT_WORKFLOW.md](docs/MULTI_AGENT_WORKFLOW.md).
 
-## CLI Commands
+## Usage & CLI Commands
 
 ```powershell
-# Inspect platform capabilities, power status, and connected displays
-cargo run -- status
+# Launch the interactive Auralis Configuration Studio UI (default when double-clicking auralis.exe)
+cargo run --release
+# or:
+.\target\release\auralis.exe gui
 
-# Validate a video file for wallpaper compatibility
-cargo run -- validate path/to/video.mp4
-
-# Verify native desktop WorkerW window creation and cleanup behind desktop icons
-cargo run -- verify-desktop
+# Play a live video wallpaper behind desktop icons for N seconds from the CLI
+.\target\release\auralis.exe play path\to\video.mp4 15
 
 # Apply a wallpaper to a display and persist configuration
-cargo run -- apply path/to/video.mp4 [DISPLAY_1]
+.\target\release\auralis.exe apply path\to\video.mp4 [DISPLAY_1]
+
+# Inspect platform capabilities, power status, and connected displays
+.\target\release\auralis.exe status
+
+# Validate a video file for wallpaper compatibility
+.\target\release\auralis.exe validate path\to\video.mp4
+
+# Verify native desktop WorkerW window creation and cleanup behind desktop icons
+.\target\release\auralis.exe verify-desktop
 ```
 
 ## Quality Gates & Local Verification
 
-Before submitting changes or pushing, all quality gates must pass:
+Before submitting changes or pushing, all 5 local quality gates must pass:
 
 ```powershell
 # Windows PowerShell
@@ -48,10 +57,13 @@ These scripts verify:
 4. Release Compilation: `cargo build --workspace --release`
 5. Patch Hygiene: `git diff --check`
 
-## Continuous Integration
+## Publishing a Release & Triggering Auto-Build CI/CD
 
-GitHub Actions workflows are configured to run native compilation and tests on:
-- Windows (`windows-latest`)
-- macOS (`macos-latest`)
-
-See [docs/CI_CD_SETUP.md](docs/CI_CD_SETUP.md) for CI details.
+Releases are tag-driven via [`.github/workflows/release.yml`](.github/workflows/release.yml):
+1. Push `main` and the matching annotated SemVer tag (e.g., `v0.1.0-beta.1`) to GitHub:
+   ```powershell
+   git push -u origin main
+   git tag -a v0.1.0-beta.1 -m "Auralis v0.1.0-beta.1 Beta Release"
+   git push origin v0.1.0-beta.1
+   ```
+2. GitHub Actions automatically verifies that the tag matches `Cargo.toml` (`0.1.0-beta.1`), runs the full verification suite on native `windows-latest` and `macos-latest` runners, packages `auralis-v0.1.0-beta.1-x86_64-pc-windows-msvc.zip` and `auralis-v0.1.0-beta.1-aarch64-apple-darwin.tar.gz` with SHA-256 checksums, and creates the GitHub Release.
