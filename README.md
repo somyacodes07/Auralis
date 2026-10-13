@@ -5,11 +5,27 @@ A premium, Rust-first live wallpaper application targeting **macOS** and **Windo
 ## Mission & Architecture
 
 Auralis delivers a reliable, smooth video wallpaper experience behind desktop icons and application windows:
-- **Rust-First Core**: Shared application state, configuration, and orchestration logic.
-- **Native Bridges**: Clean, decoupled platform adapters (AVFoundation on macOS, Media Foundation on Windows).
-- **Multi-Agent Engineering**: Built collaboratively with **Antigravity** (implementation) and **OpenCode** (verification).
+- **Rust-First Core**: Shared application state, configuration (`src/config.rs`), playback controller (`src/media/`), and multi-display engine orchestrator (`src/engine.rs`).
+- **Native Bridges**: Clean, decoupled platform adapters (`src/platform/` — AVFoundation on macOS, Media Foundation & `Progman`/`WorkerW` on Windows).
+- **Multi-Agent Engineering**: Built collaboratively with **Antigravity** (primary implementation agent) and **Freebuff** (independent verification agent via [`knowledge.md`](knowledge.md)).
 
 For detailed engineering guidelines, see [AGENTS.md](AGENTS.md) and [docs/MULTI_AGENT_WORKFLOW.md](docs/MULTI_AGENT_WORKFLOW.md).
+
+## CLI Commands
+
+```powershell
+# Inspect platform capabilities, power status, and connected displays
+cargo run -- status
+
+# Validate a video file for wallpaper compatibility
+cargo run -- validate path/to/video.mp4
+
+# Verify native desktop WorkerW window creation and cleanup behind desktop icons
+cargo run -- verify-desktop
+
+# Apply a wallpaper to a display and persist configuration
+cargo run -- apply path/to/video.mp4 [DISPLAY_1]
+```
 
 ## Quality Gates & Local Verification
 
@@ -17,7 +33,7 @@ Before submitting changes or pushing, all quality gates must pass:
 
 ```powershell
 # Windows PowerShell
-pwsh scripts/verify.ps1
+powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
 ```
 
 ```bash

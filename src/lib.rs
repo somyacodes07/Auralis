@@ -11,12 +11,16 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod config;
+pub mod engine;
 pub mod media;
 pub mod platform;
 
 pub use config::{validate_media_file, AppConfig, ConfigError, DisplayWallpaperConfig};
+pub use engine::WallpaperEngine;
 pub use media::{MediaController, PlaybackState};
-pub use platform::{create_platform_adapter, DisplayInfo, PlatformAdapter, PlatformError};
+pub use platform::{
+    create_platform_adapter, DisplayInfo, PlatformAdapter, PlatformError, PowerStatus,
+};
 
 /// Supported platform capabilities detected at runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
