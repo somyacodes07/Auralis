@@ -1095,6 +1095,13 @@ mod tests {
             return;
         }
 
+        if !workerw_desktop_layer_is_available() {
+            eprintln!(
+                "Skipping WorkerW integration assertions: this Windows session does not expose a WorkerW wallpaper layer."
+            );
+            return;
+        }
+
         let mut adapter = WindowsPlatformAdapter::new();
         let displays = adapter.enumerate_displays().unwrap();
         let primary = &displays[0];
@@ -1171,5 +1178,57 @@ mod tests {
                 return true;
             }
         }
+    }
+
+    /// GitHub-hosted Windows runners can expose the interactive shell and desktop icon view
+    /// without creating the WorkerW layer used for wallpaper hosting. Probe that OS/session
+    /// capability before asserting the application lifecycle, so an unavailable desktop
+    /// surface is reported as a skip while failures remain visible when WorkerW exists.
+    fn workerw_desktop_layer_is_available() -> bool {
+        let progman_class = wide_string("Progman");
+        let workerw_class = wide_string("WorkerW");
+        // SAFETY: progman_class is null-terminated and remains alive for this call.
+        let progman = unsafe { FindWindowW(progman_class.as_ptr(), std::ptr::null()) };
+        if progman.is_null() {
+            return false;
+        }
+
+        let mut send_result = 0usize;
+        // SAFETY: progman is a live window handle and send_result is a valid output pointer.
+        unsafe {
+            SendMessageTimeoutW(
+                progman,
+                WM_SPAWN_WORKERW,
+                0,
+                0,
+                SMTO_NORMAL,
+                1000,
+                &mut send_result,
+            );
+        }
+
+        // SAFETY: workerw_class is null-terminated and both HWND search handles are valid nulls.
+        let top_level_workerw = unsafe {
+            FindWindowExW(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                workerw_class.as_ptr(),
+                std::ptr::null(),
+            )
+        };
+        if !top_level_workerw.is_null() {
+            return true;
+        }
+
+        // SAFETY: progman is a live window handle and workerw_class is null-terminated.
+        let child_workerw = unsafe {
+            FindWindowExW(
+                progman,
+                std::ptr::null_mut(),
+                workerw_class.as_ptr(),
+                std::ptr::null(),
+            )
+        };
+        !child_workerw.is_null()
     }
 }
