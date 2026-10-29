@@ -36,10 +36,11 @@ use windows_sys::Win32::UI::Controls::Dialogs::{
 use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_FOCUS, ODS_HOTLIGHT, ODS_SELECTED,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, IsWindowEnabled};
 use windows_sys::Win32::UI::Shell::{
-    DragAcceptFiles, DragFinish, DragQueryFileW, Shell_NotifyIconW, HDROP, NIF_ICON, NIF_MESSAGE,
-    NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, RemoveWindowSubclass,
+    SetWindowSubclass, Shell_NotifyIconW, HDROP, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
+    NIM_DELETE, NOTIFYICONDATAW, SUBCLASSPROC,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
@@ -54,10 +55,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SPI_GETCLIENTAREAANIMATION, SW_HIDE, SW_RESTORE, SW_SHOW, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
     TPM_RETURNCMD, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
     WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DISPLAYCHANGE, WM_DRAWITEM, WM_DROPFILES,
-    WM_ERASEBKGND, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MEASUREITEM, WM_PAINT, WM_POWERBROADCAST,
-    WM_RBUTTONUP, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    WM_ERASEBKGND, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MEASUREITEM, WM_NCDESTROY, WM_PAINT,
+    WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 pub const WINDOW_CLASS_NAME: &str = "AuralisConfigStudioWindowClass";
@@ -109,6 +110,18 @@ const TIMER_INTERVAL_MS: u32 = 100;
 
 const BST_CHECKED: usize = 1;
 const BST_UNCHECKED: usize = 0;
+
+const fn is_checkbox_control_id(control_id: usize) -> bool {
+    matches!(
+        control_id,
+        ID_CHK_MUTE
+            | ID_CHK_LOOP
+            | ID_CHK_FULLSCREEN
+            | ID_CHK_BATTERY
+            | ID_CHK_STARTUP
+            | ID_CHK_REDUCE_MOTION
+    )
+}
 
 struct GuiState {
     engine: WallpaperEngine,
@@ -830,7 +843,9 @@ unsafe fn draw_action_button(item: &DRAWITEMSTRUCT) {
     let hot = item.itemState & ODS_HOTLIGHT != 0;
     let focused = item.itemState & ODS_FOCUS != 0;
     let disabled = item.itemState & 0x0004 != 0;
-    let face = if primary {
+    let face = if disabled {
+        rgb(33, 33, 35)
+    } else if primary {
         if pressed {
             rgb(195, 195, 197)
         } else if hot {
@@ -845,7 +860,9 @@ unsafe fn draw_action_button(item: &DRAWITEMSTRUCT) {
     } else {
         rgb(35, 35, 37)
     };
-    let edge = if primary {
+    let edge = if disabled {
+        rgb(46, 46, 48)
+    } else if primary {
         face
     } else if hot {
         rgb(78, 78, 81)
@@ -915,6 +932,177 @@ unsafe fn draw_action_button(item: &DRAWITEMSTRUCT) {
         focus_rect.right -= 5;
         focus_rect.bottom -= 4;
         DrawFocusRect(item.hDC, &focus_rect);
+    }
+}
+
+/// Apply custom dark painting while leaving the native auto-checkbox style intact for UI Automation.
+unsafe extern "system" fn checkbox_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    subclass_id: usize,
+    _ref_data: usize,
+) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            paint_checkbox(hwnd);
+            0
+        }
+        WM_NCDESTROY => {
+            // SAFETY: The subclass is removed from the same child window during its destruction.
+            unsafe { RemoveWindowSubclass(hwnd, Some(checkbox_subclass_proc), subclass_id) };
+            // SAFETY: DefSubclassProc forwards the final lifecycle message to the native button.
+            unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+        }
+        _ => {
+            // SAFETY: All input, keyboard, and automation messages retain the native checkbox behavior.
+            unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+        }
+    }
+}
+
+/// Paint a monochrome checkbox without replacing its native checked state or accessibility role.
+fn paint_checkbox(hwnd: HWND) {
+    let mut paint: windows_sys::Win32::Graphics::Gdi::PAINTSTRUCT = unsafe { mem::zeroed() };
+    // SAFETY: BeginPaint/EndPaint delimit this checkbox's WM_PAINT handling.
+    let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
+    if hdc.is_null() {
+        return;
+    }
+
+    let (card_brush, ui_font) = GUI_STATE
+        .with(|cell| {
+            cell.try_borrow().ok().and_then(|guard| {
+                let state = guard.as_ref()?;
+                Some((state.card_brush, state.ui_font))
+            })
+        })
+        .unwrap_or((std::ptr::null_mut(), std::ptr::null_mut()));
+    let (_, scale) = query_dpi_scale();
+    let mut client: RECT = unsafe { mem::zeroed() };
+    // SAFETY: hwnd is the live checkbox child receiving WM_PAINT.
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client) };
+    if !card_brush.is_null() {
+        // SAFETY: Fills this checkbox's client area with the surrounding card surface color.
+        unsafe { FillRect(hdc, &client, card_brush) };
+    }
+
+    // SAFETY: BM_GETCHECK/BM_GETSTATE read state maintained by the native auto-checkbox control.
+    let checked = unsafe { SendMessageW(hwnd, BM_GETCHECK, 0, 0) } == BST_CHECKED as isize;
+    let pressed = unsafe {
+        SendMessageW(
+            hwnd,
+            windows_sys::Win32::UI::WindowsAndMessaging::BM_GETSTATE,
+            0,
+            0,
+        )
+    } & 0x0004
+        != 0;
+    let disabled = unsafe { IsWindowEnabled(hwnd) } == 0;
+    let focused = unsafe { GetFocus() } == hwnd;
+    let size = scale_px(16, scale).max(14);
+    let left = client.left + scale_px(1, scale);
+    let top = client.top + ((client.bottom - client.top - size) / 2);
+    let face = if checked {
+        if pressed {
+            rgb(202, 202, 204)
+        } else {
+            rgb(232, 232, 234)
+        }
+    } else if pressed {
+        rgb(40, 40, 42)
+    } else {
+        rgb(29, 29, 31)
+    };
+    let edge = if checked { face } else { rgb(76, 76, 80) };
+    let brush = unsafe { CreateSolidBrush(face) };
+    let pen = unsafe { CreatePen(0, scale_px(1, scale).max(1), edge) };
+    if !brush.is_null() && !pen.is_null() {
+        // SAFETY: The temporary pen and brush are restored and deleted before EndPaint.
+        unsafe {
+            let old_brush = SelectObject(hdc, brush as HGDIOBJ);
+            let old_pen = SelectObject(hdc, pen as HGDIOBJ);
+            RoundRect(
+                hdc,
+                left,
+                top,
+                left + size,
+                top + size,
+                scale_px(5, scale),
+                scale_px(5, scale),
+            );
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_pen);
+            DeleteObject(brush as HGDIOBJ);
+            DeleteObject(pen as HGDIOBJ);
+        }
+    } else {
+        if !brush.is_null() {
+            unsafe { DeleteObject(brush as HGDIOBJ) };
+        }
+        if !pen.is_null() {
+            unsafe { DeleteObject(pen as HGDIOBJ) };
+        }
+    }
+
+    if checked {
+        let check_pen = unsafe { CreatePen(0, scale_px(2, scale).max(1), rgb(20, 20, 21)) };
+        if !check_pen.is_null() {
+            // SAFETY: Draws the check glyph and restores/deletes its temporary pen.
+            unsafe {
+                let old_check_pen = SelectObject(hdc, check_pen as HGDIOBJ);
+                MoveToEx(
+                    hdc,
+                    left + scale_px(4, scale),
+                    top + scale_px(8, scale),
+                    std::ptr::null_mut(),
+                );
+                LineTo(hdc, left + scale_px(7, scale), top + scale_px(11, scale));
+                LineTo(hdc, left + scale_px(13, scale), top + scale_px(5, scale));
+                SelectObject(hdc, old_check_pen);
+                DeleteObject(check_pen as HGDIOBJ);
+            }
+        }
+    }
+
+    // SAFETY: Selects the app font and writes the label inside this checkbox's client rectangle.
+    unsafe {
+        SetBkMode(hdc, TRANSPARENT as i32);
+        if !ui_font.is_null() {
+            let old_font = SelectObject(hdc, ui_font as HGDIOBJ);
+            SetTextColor(
+                hdc,
+                if disabled {
+                    rgb(124, 124, 128)
+                } else {
+                    rgb(220, 220, 222)
+                },
+            );
+            let mut text = vec![0u16; 512];
+            let text_len = GetWindowTextW(hwnd, text.as_mut_ptr(), text.len() as i32);
+            let mut text_rect = client;
+            text_rect.left = left + size + scale_px(10, scale);
+            DrawTextW(
+                hdc,
+                text.as_ptr(),
+                text_len,
+                &mut text_rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            if !old_font.is_null() {
+                SelectObject(hdc, old_font);
+            }
+        }
+        if focused {
+            let mut focus_rect = client;
+            focus_rect.left += scale_px(1, scale);
+            focus_rect.top += scale_px(1, scale);
+            focus_rect.right -= scale_px(1, scale);
+            focus_rect.bottom -= scale_px(1, scale);
+            DrawFocusRect(hdc, &focus_rect);
+        }
+        EndPaint(hwnd, &paint);
     }
 }
 
@@ -1535,6 +1723,14 @@ fn create_child_controls(parent: HWND) {
             );
             if !ctrl.is_null() {
                 SendMessageW(ctrl, WM_SETFONT, hfont as WPARAM, 1);
+                if is_checkbox_control_id(id) {
+                    let subclass_proc: SUBCLASSPROC = Some(checkbox_subclass_proc);
+                    // SAFETY: The subclass only custom-paints this native checkbox; all input and
+                    // accessibility messages continue through DefSubclassProc.
+                    if SetWindowSubclass(ctrl, subclass_proc, id, 0) == 0 {
+                        eprintln!("Auralis could not apply checkbox styling to control {id}.");
+                    }
+                }
             }
             ctrl
         }
