@@ -1015,6 +1015,9 @@ pub(crate) fn string_from_wide(slice: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::System::RemoteDesktop::{
+        ProcessIdToSessionId, WTSGetActiveConsoleSessionId,
+    };
     use windows_sys::Win32::System::StationsAndDesktops::{
         GetProcessWindowStation, GetUserObjectInformationW, UOI_FLAGS, USEROBJECTFLAGS,
     };
@@ -1082,9 +1085,12 @@ mod tests {
 
     #[test]
     fn test_workerw_and_host_window_lifecycle() {
-        if !process_window_station_has_visible_surfaces() || !has_shell_desktop_view() {
+        if !process_window_station_has_visible_surfaces()
+            || !process_session_is_active_console()
+            || !has_shell_desktop_view()
+        {
             eprintln!(
-                "Skipping WorkerW integration assertions: this session has no visible shell desktop surface."
+                "Skipping WorkerW integration assertions: this session is not the active interactive console desktop."
             );
             return;
         }
@@ -1124,6 +1130,15 @@ mod tests {
                 &mut required,
             ) != 0
                 && flags.dwFlags & (WSF_VISIBLE as u32) != 0
+        }
+    }
+
+    fn process_session_is_active_console() -> bool {
+        let mut process_session_id = 0u32;
+        // SAFETY: ProcessIdToSessionId writes one session identifier to the valid output pointer.
+        unsafe {
+            ProcessIdToSessionId(std::process::id(), &mut process_session_id) != 0
+                && process_session_id == WTSGetActiveConsoleSessionId()
         }
     }
 

@@ -13,7 +13,7 @@ GitHub Actions are pinned to full commit SHAs. Dependabot checks the GitHub Acti
 
 These checks prove compilation and automated tests on the runners. They do not prove Windows `WorkerW` desktop layering, macOS wallpaper playback, or any other behavior that requires an interactive desktop acceptance test.
 
-The Windows WorkerW lifecycle test runs when the current session exposes a visible shell desktop surface. A headless service session reports that prerequisite and skips only the desktop-layering assertions; an interactive session still exercises the real host creation, resize, and teardown path.
+The Windows WorkerW lifecycle test runs in the active interactive console session with a visible shell desktop surface. A service, headless, or non-console session reports that prerequisite and skips only the desktop-layering assertions; an active console session still exercises the real host creation, resize, and teardown path.
 
 ## Draft releases
 
