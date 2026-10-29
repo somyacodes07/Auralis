@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 430 112" role="img" aria-labelledby="title description">
+  <title id="title">Auralis</title>
+  <desc id="description">A monochrome A-shaped soundwave mark with the Auralis live wallpaper wordmark.</desc>
+  <g fill="none" stroke="#f0f0f1" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13 84C22 63 31 38 47 19c16 19 25 44 34 65" stroke-width="4"/>
+    <path d="M25 84c6-15 13-31 22-42 9 11 16 27 22 42" stroke-width="3" opacity=".66"/>
+    <path d="M31 61h10l6-9 7 18 6-9h8" stroke-width="3"/>
+  </g>
+  <g fill="#f0f0f1" font-family="Inter, Avenir Next, Segoe UI, sans-serif">
+    <text x="103" y="66" font-size="44" font-weight="650" letter-spacing="8">AURALIS</text>
+    <text x="106" y="91" font-size="11" font-weight="500" letter-spacing="4.4" opacity=".62">LIVE WALLPAPER</text>
+  </g>
+</svg>

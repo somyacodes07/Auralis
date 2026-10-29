@@ -140,6 +140,9 @@ pub struct AppConfig {
     pub pause_on_battery: bool,
     /// Automatically launch Auralis at user login.
     pub launch_at_startup: bool,
+    /// Suppress nonessential interface animation for accessibility.
+    #[serde(default)]
+    pub reduce_motion: bool,
 }
 
 impl Default for AppConfig {
@@ -152,6 +155,7 @@ impl Default for AppConfig {
             pause_on_fullscreen: true,
             pause_on_battery: true,
             launch_at_startup: false,
+            reduce_motion: false,
         }
     }
 }
@@ -345,6 +349,7 @@ mod tests {
         assert!(config.pause_on_fullscreen);
         assert!(config.pause_on_battery);
         assert!(!config.launch_at_startup);
+        assert!(!config.reduce_motion);
         assert!(config.default_wallpaper.is_none());
         assert!(config.per_display.is_empty());
     }
@@ -357,6 +362,7 @@ mod tests {
         let config = AppConfig {
             launch_at_startup: true,
             pause_on_battery: false,
+            reduce_motion: true,
             ..Default::default()
         };
 
@@ -369,6 +375,7 @@ mod tests {
         assert_eq!(loaded.schema_version, CURRENT_SCHEMA_VERSION);
         assert!(loaded.launch_at_startup);
         assert!(!loaded.pause_on_battery);
+        assert!(loaded.reduce_motion);
 
         // Cleanup
         let _ = fs::remove_dir_all(&temp_dir);
@@ -417,6 +424,7 @@ mod tests {
         assert_eq!(loaded.schema_version, CURRENT_SCHEMA_VERSION);
         assert!(loaded.per_display.contains_key("DISPLAY1"));
         assert!(!loaded.per_display.contains_key("DISPLAY_1"));
+        assert!(!loaded.reduce_motion);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

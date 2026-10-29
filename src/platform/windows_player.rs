@@ -337,10 +337,10 @@ impl MfVideoPlayer {
 
     /// Synchronously validate and load a new video file into this existing player instance.
     ///
-    /// Releases the previous media item's 4K DXVA2 decode surfaces before allocating the new
-    /// topology so two 4K surface pools never overlap in RAM (~350 MB savings), and automatically
-    /// restores the previous working wallpaper if `CreateMediaItemFromURL` rejects the replacement
-    /// (`AGENTS.md` Principle 9).
+    /// Stops and clears the previous media item before loading a replacement, then restores the
+    /// previous working wallpaper if `CreateMediaItemFromURL` rejects the replacement
+    /// (`AGENTS.md` Principle 9). Actual decoder memory release depends on Media Foundation and
+    /// the device; this lifecycle change does not guarantee a fixed memory reduction.
     pub fn load_and_play(
         &mut self,
         path: &Path,
@@ -351,8 +351,8 @@ impl MfVideoPlayer {
         let prev_muted = self.muted;
         let prev_vol = self.volume;
 
-        // If a media item was already playing on this player, release its decode surface pool
-        // BEFORE allocating the new topology so two 4K surface pools never coexist in RAM.
+        // If a media item was already playing on this player, stop and clear it before loading a
+        // replacement so the old topology is not intentionally retained alongside the new one.
         let player = self.as_ptr();
         if player.is_null() {
             return Err(PlatformError::MediaPlaybackFailed(

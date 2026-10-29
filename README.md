@@ -5,15 +5,23 @@ A premium, Rust-first live wallpaper application targeting **Windows** and **mac
 ## Features (`v0.2.0-beta.1`)
 
 - **Native Hardware-Decoded Video Wallpapers (Windows)**: Renders `.mp4`, `.mov`, `.mkv`, `.webm`, and `.m4v` videos directly behind desktop icons (`Progman`/`WorkerW`) using Windows Media Foundation (`mfplay.dll` / `IMFPMediaPlayer`) with Per-Monitor V2 physical DPI scaling and pre-EOS seamless loop seeking.
-- **Optimized 4K Memory Footprint**: Zero-overlap 4K surface pool switching, automatic in-app preview decoder teardown when applying desktop wallpapers, and cold Media Foundation staging page reclamation (`K32EmptyWorkingSet`) keep steady-state Working Set memory minimal even on 4K UHD (`3840x2160`) wallpapers.
+- **Memory-conscious playback flow**: Auralis stops its preview decoder before applying a wallpaper, avoiding two simultaneous video decoders. Playback keeps the source resolution and uses the platform video path; resource use depends on the selected video and hardware. The Studio reports process Working Set and Private Bytes separately, since trimming resident pages does not reduce committed private memory.
 - **Live Playback Speed, Aspect Scaling & Recent Wallpapers**: Adjust playback speed (`0.25x` – `2.00x`), toggle aspect scaling between **Fill (Full Screen)** and **Fit (Letterbox)**, and cycle through up to 10 recent wallpapers from the Studio UI or System Tray menu.
-- **Native Configuration Studio UI & In-App Video Preview**: Launch `auralis.exe` (or `cargo run`) to open the native Windows Configuration Studio featuring an embedded **16:9 In-App Video Preview Panel**, Drag-and-Drop file loading, monitor selection, live playback/audio/loop/speed/scale controls, and real-time measured Working Set & Private RAM/CPU telemetry.
-- **System Tray & Login Startup Integration**: Minimizes cleanly to the Windows System Tray (`Shell_NotifyIconW`) with a right-click quick-control menu (`Open`, `Next Recent Wallpaper`, `Pause / Resume`, `Mute / Unmute`, `Stop`, `Quit`) and optional Login Startup registration (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` on Windows, `~/Library/LaunchAgents` on macOS).
+- **Monochrome Configuration Studio UI & In-App Video Preview**: Launch `auralis.exe` (or `cargo run`) to open the native Windows Studio with an embedded video preview, drag-and-drop file loading, monitor selection, playback/audio/loop/speed/scale controls, and live Working Set, Private Bytes, and CPU telemetry. Its SVG wordmark and grayscale live indicator match the refreshed interface; a saved Reduce Motion preference also honors Windows accessibility settings.
+- **Windows System Tray & Login Startup Integration**: Minimizes to the Windows System Tray (`Shell_NotifyIconW`) with a right-click quick-control menu (`Open`, `Next Recent Wallpaper`, `Pause / Resume`, `Mute / Unmute`, `Stop`, `Quit`) and optional login startup registration (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
 - **Resilient Runtime**: Closing or minimizing the configuration window keeps your live wallpaper playing in the background. Failed media replacements automatically preserve your previous working wallpaper, and corrupt config files are safely backed up to `.corrupt.bak`.
 - **Smart Power, Sleep/Wake & Full-Screen Policies**: Automatically pauses video playback when a full-screen application/game occludes the monitor, when the system enters sleep (`WM_POWERBROADCAST`), or when running on battery power.
 - **Multi-Agent Engineering**: Built collaboratively with **Antigravity** (primary implementation agent) and **Freebuff** (independent verification agent via [`knowledge.md`](knowledge.md)).
 
+## Platform support
+
+| Platform | Current support |
+| --- | --- |
+| Windows x64 | Native Studio UI, desktop wallpaper layering, hardware video playback, tray controls, and startup integration are implemented. CI builds and tests on Windows; desktop layering and playback still need manual acceptance testing on each supported Windows configuration. |
+| macOS | CLI status and video-file validation only. The macOS wallpaper player and configuration UI are not implemented; `gui` currently falls back to status output. |
+
 For detailed engineering guidelines, see [AGENTS.md](AGENTS.md) and [docs/MULTI_AGENT_WORKFLOW.md](docs/MULTI_AGENT_WORKFLOW.md).
+The monochrome brand asset is [assets/auralis-logo.svg](assets/auralis-logo.svg); design and resource measurement notes are in [docs/UX_AND_PERFORMANCE.md](docs/UX_AND_PERFORMANCE.md).
 
 ## Usage & CLI Commands
 
@@ -62,11 +70,12 @@ These scripts verify:
 
 ## Publishing a Release & Triggering Auto-Build CI/CD
 
-Releases are tag-driven via [`.github/workflows/release.yml`](.github/workflows/release.yml):
-1. Push `main` and the matching annotated SemVer tag (e.g., `v0.2.0-beta.1`) to GitHub:
+Releases are tag-driven via [`.github/workflows/release.yml`](.github/workflows/release.yml). The workflow accepts `v*` tags, then verifies SemVer syntax, exact equality with `Cargo.toml`, and that the tagged commit is reachable from the default branch. It runs formatting, Clippy, tests, and a release build on Windows and macOS. The resulting release remains a draft:
+
+1. Push the committed source to the default branch, then push its matching annotated SemVer tag (e.g., `v0.2.0-beta.1`):
    ```powershell
    git push -u origin main
    git tag -a v0.2.0-beta.1 -m "Auralis v0.2.0-beta.1 Beta Release"
    git push origin v0.2.0-beta.1
    ```
-2. GitHub Actions automatically verifies that the tag matches `Cargo.toml` (`0.2.0-beta.1`), runs the full verification suite on native `windows-latest` and `macos-latest` runners, packages `auralis-v0.2.0-beta.1-x86_64-pc-windows-msvc.zip` and `auralis-v0.2.0-beta.1-aarch64-apple-darwin.tar.gz` with SHA-256 checksums, and creates the GitHub Release.
+2. GitHub Actions creates a **draft** release with `auralis-v<version>-windows-x86_64.zip` and `auralis-v<version>-macos-<arch>.tar.gz` plus SHA-256 checksum files. The macOS binary is a single-architecture CLI artifact, not a universal app or a wallpaper app. Review and publish the draft manually only after platform acceptance testing.
