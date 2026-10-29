@@ -1207,20 +1207,50 @@ mod tests {
             );
         }
 
-        // SAFETY: workerw_class is null-terminated and both HWND search handles are valid nulls.
-        let top_level_workerw = unsafe {
-            FindWindowExW(
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                workerw_class.as_ptr(),
-                std::ptr::null(),
-            )
-        };
-        if !top_level_workerw.is_null() {
-            return true;
+        let shell_view_class = wide_string("SHELLDLL_DefView");
+        let mut top_level = std::ptr::null_mut();
+        loop {
+            // SAFETY: A null class name enumerates top-level windows after the previous handle.
+            top_level = unsafe {
+                FindWindowExW(
+                    std::ptr::null_mut(),
+                    top_level,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            if top_level.is_null() {
+                break;
+            }
+
+            // SAFETY: top_level is a live window handle and shell_view_class is null-terminated.
+            let shell_view = unsafe {
+                FindWindowExW(
+                    top_level,
+                    std::ptr::null_mut(),
+                    shell_view_class.as_ptr(),
+                    std::ptr::null(),
+                )
+            };
+            if shell_view.is_null() {
+                continue;
+            }
+
+            // SAFETY: The search starts after a live top-level window and uses a null-terminated class.
+            let workerw_sibling = unsafe {
+                FindWindowExW(
+                    std::ptr::null_mut(),
+                    top_level,
+                    workerw_class.as_ptr(),
+                    std::ptr::null(),
+                )
+            };
+            if !workerw_sibling.is_null() {
+                return true;
+            }
         }
 
-        // SAFETY: progman is a live window handle and workerw_class is null-terminated.
+        // SAFETY: progman is live and both child search class names are null-terminated.
         let child_workerw = unsafe {
             FindWindowExW(
                 progman,
