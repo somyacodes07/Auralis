@@ -13,6 +13,8 @@ GitHub Actions are pinned to full commit SHAs. Dependabot checks the GitHub Acti
 
 These checks prove compilation and automated tests on the runners. They do not prove Windows `WorkerW` desktop layering, macOS wallpaper playback, or any other behavior that requires an interactive desktop acceptance test.
 
+The Windows WorkerW lifecycle test runs when the current session exposes a visible shell desktop surface. A headless service session reports that prerequisite and skips only the desktop-layering assertions; an interactive session still exercises the real host creation, resize, and teardown path.
+
 ## Draft releases
 
 Only push a matching annotated SemVer tag after its commit is on the default branch. For example, when `Cargo.toml` declares `0.2.0-beta.1`:

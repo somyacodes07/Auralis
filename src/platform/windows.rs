@@ -1015,6 +1015,10 @@ pub(crate) fn string_from_wide(slice: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        GetProcessWindowStation, GetUserObjectInformationW, UOI_FLAGS, USEROBJECTFLAGS,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::WSF_VISIBLE;
 
     #[test]
     fn test_wide_string_conversion() {
@@ -1078,6 +1082,13 @@ mod tests {
 
     #[test]
     fn test_workerw_and_host_window_lifecycle() {
+        if !process_window_station_has_visible_surfaces() || !has_shell_desktop_view() {
+            eprintln!(
+                "Skipping WorkerW integration assertions: this session has no visible shell desktop surface."
+            );
+            return;
+        }
+
         let mut adapter = WindowsPlatformAdapter::new();
         let displays = adapter.enumerate_displays().unwrap();
         let primary = &displays[0];
@@ -1088,10 +1099,62 @@ mod tests {
                 assert!(adapter.resize_wallpaper_host_window(hwnd, primary).is_ok());
                 assert!(adapter.destroy_wallpaper_host_window(hwnd).is_ok());
             }
-            Err(PlatformError::DesktopWindowNotFound) => {
-                // Acceptable only in headless CI service sessions where explorer.exe is not running
-            }
             Err(other) => panic!("Unexpected desktop layering error: {other}"),
+        }
+    }
+
+    /// A service window station can expose placeholder Progman handles without the visible
+    /// desktop surface WorkerW wallpaper hosting requires. Gate only this desktop integration
+    /// test when the documented WSF_VISIBLE prerequisite is absent.
+    fn process_window_station_has_visible_surfaces() -> bool {
+        let station = unsafe { GetProcessWindowStation() };
+        if station.is_null() {
+            return false;
+        }
+
+        let mut flags: USEROBJECTFLAGS = unsafe { mem::zeroed() };
+        let mut required = 0u32;
+        // SAFETY: GetUserObjectInformationW writes one USEROBJECTFLAGS value to our sized buffer.
+        unsafe {
+            GetUserObjectInformationW(
+                station,
+                UOI_FLAGS,
+                (&mut flags as *mut USEROBJECTFLAGS).cast(),
+                mem::size_of::<USEROBJECTFLAGS>() as u32,
+                &mut required,
+            ) != 0
+                && flags.dwFlags & (WSF_VISIBLE as u32) != 0
+        }
+    }
+
+    fn has_shell_desktop_view() -> bool {
+        let shell_view_class = wide_string("SHELLDLL_DefView");
+        let mut top_level = std::ptr::null_mut();
+        loop {
+            // SAFETY: A null class name enumerates top-level windows after the previous handle.
+            top_level = unsafe {
+                FindWindowExW(
+                    std::ptr::null_mut(),
+                    top_level,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            if top_level.is_null() {
+                return false;
+            }
+            // SAFETY: Searches direct children of a live top-level window for the shell icon view.
+            let shell_view = unsafe {
+                FindWindowExW(
+                    top_level,
+                    std::ptr::null_mut(),
+                    shell_view_class.as_ptr(),
+                    std::ptr::null(),
+                )
+            };
+            if !shell_view.is_null() {
+                return true;
+            }
         }
     }
 }

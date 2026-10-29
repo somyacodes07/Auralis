@@ -74,7 +74,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run Unit & Integration Tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --show-output
 
       - name: Release Build
         run: cargo build --workspace --release --locked
