@@ -445,7 +445,7 @@ pub fn run_windows_gui(
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             scale_px(1180, scale),
-            scale_px(770, scale),
+            scale_px(850, scale),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             hinstance,
@@ -647,12 +647,12 @@ fn paint_main_window(hwnd: HWND) {
         let (_, scale) = query_dpi_scale();
         for (left, top, right, bottom) in [
             (18, 9, 1142, 57),
-            (18, 64, 748, 306),
-            (758, 64, 1142, 364),
-            (18, 320, 748, 468),
-            (758, 376, 1142, 510),
-            (18, 526, 1142, 656),
-            (18, 658, 1142, 714),
+            (18, 64, 584, 456),
+            (594, 64, 1142, 456),
+            (18, 472, 584, 624),
+            (594, 472, 1142, 624),
+            (18, 640, 1142, 748),
+            (18, 752, 1142, 806),
         ] {
             RoundRect(
                 hdc,
@@ -666,11 +666,11 @@ fn paint_main_window(hwnd: HWND) {
         }
         // Fine inset rules align the controls into a consistent card rhythm without adding color.
         for (left, top, right) in [
-            (42, 101, 724),
-            (782, 101, 1122),
-            (42, 359, 724),
-            (782, 413, 1122),
-            (42, 564, 1122),
+            (42, 101, 560),
+            (618, 101, 1122),
+            (42, 512, 560),
+            (618, 512, 1122),
+            (42, 678, 1122),
         ] {
             MoveToEx(
                 hdc,
@@ -773,11 +773,11 @@ fn paint_main_window(hwnd: HWND) {
         // Quiet context labels make each panel's purpose legible before the user scans controls.
         SetTextColor(hdc, rgb(133, 133, 137));
         for (left, top, right, bottom, label) in [
-            (210, 79, 710, 103, "DISPLAY  ·  VIDEO SOURCE"),
-            (889, 79, 1122, 103, "16:9  ·  LOCAL PREVIEW"),
-            (164, 337, 700, 361, "AUDIO  ·  LOOP  ·  PLAYBACK"),
-            (890, 391, 1122, 415, "AUTOMATIC PAUSE RULES"),
-            (195, 542, 600, 566, "PLAYBACK  ·  RESOURCE USAGE"),
+            (412, 79, 560, 101, "16:9  ·  LOCAL PREVIEW"),
+            (832, 79, 1122, 101, "DISPLAY  ·  VIDEO SOURCE"),
+            (166, 489, 560, 512, "AUDIO  ·  LOOP  ·  PLAYBACK"),
+            (850, 489, 1122, 512, "AUTOMATIC PAUSE RULES"),
+            (205, 647, 1122, 678, "PLAYBACK  ·  RESOURCE USAGE"),
         ] {
             let mut rect = RECT {
                 left: scale_px(left, scale),
@@ -1744,108 +1744,34 @@ fn create_child_controls(parent: HWND) {
         control
     };
 
-    mk_section("Wallpaper source", 42, 79, 180);
-    mk_ctrl("STATIC", "Display", SS_NOPREFIX, 42, 112, 84, 24, 0);
-    let cmb_display = mk_ctrl(
-        "COMBOBOX",
-        "",
-        CBS_DROPDOWNLIST as u32 | CBS_OWNERDRAWFIXED as u32 | CBS_HASSTRINGS as u32 | WS_TABSTOP,
-        132,
-        105,
-        574,
-        30,
-        ID_CMB_DISPLAY,
-    );
-    mk_ctrl("STATIC", "Video file", SS_NOPREFIX, 42, 153, 84, 24, 0);
-    let edt_path = mk_ctrl(
-        "EDIT",
-        "",
-        WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-        132,
-        146,
-        385,
-        32,
-        ID_EDT_PATH,
-    );
-    mk_ctrl(
-        "BUTTON",
-        "Browse",
-        BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        527,
-        145,
-        88,
-        34,
-        ID_BTN_BROWSE,
-    );
-    let btn_next_recent = mk_ctrl(
-        "BUTTON",
-        "Next recent",
-        BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        625,
-        145,
-        82,
-        34,
-        ID_BTN_NEXT_RECENT,
-    );
-    let btn_apply = mk_ctrl(
-        "BUTTON",
-        "Set wallpaper",
-        BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        42,
-        202,
-        210,
-        44,
-        ID_BTN_APPLY,
-    );
-    let btn_pause_resume = mk_ctrl(
-        "BUTTON",
-        "Pause wallpaper",
-        BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        264,
-        202,
-        182,
-        44,
-        ID_BTN_PAUSE_RESUME,
-    );
-    let btn_stop = mk_ctrl(
-        "BUTTON",
-        "Stop",
-        BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        458,
-        202,
-        170,
-        44,
-        ID_BTN_STOP,
-    );
-
-    mk_section("Preview", 782, 79, 96);
+    mk_section("Video preview", 42, 79, 150);
     let hwnd_preview = mk_ctrl(
         PREVIEW_CLASS_NAME,
         "",
         WS_BORDER | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-        778,
-        111,
-        344,
-        194,
+        42,
+        112,
+        518,
+        292,
         0,
     );
     let lbl_preview_empty = mk_ctrl(
         "STATIC",
-        "Choose a video to preview",
+        "Choose a video to see it in motion",
         SS_CENTER | SS_NOPREFIX,
-        814,
-        194,
-        272,
-        28,
+        80,
+        226,
+        442,
+        56,
         0,
     );
     let btn_preview = mk_ctrl(
         "BUTTON",
         "Preview",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        778,
-        319,
-        164,
+        42,
+        414,
+        252,
         34,
         ID_BTN_PREVIEW,
     );
@@ -1853,20 +1779,104 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Stop preview",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        954,
-        319,
-        168,
+        308,
+        414,
+        252,
         34,
         ID_BTN_STOP_PREVIEW,
     );
 
-    mk_section("Playback", 42, 337, 116);
+    mk_section("Wallpaper source", 618, 79, 170);
+    mk_ctrl("STATIC", "Display", SS_NOPREFIX, 618, 112, 92, 24, 0);
+    let cmb_display = mk_ctrl(
+        "COMBOBOX",
+        "",
+        CBS_DROPDOWNLIST as u32 | CBS_OWNERDRAWFIXED as u32 | CBS_HASSTRINGS as u32 | WS_TABSTOP,
+        618,
+        136,
+        504,
+        30,
+        ID_CMB_DISPLAY,
+    );
+    mk_ctrl("STATIC", "Video file", SS_NOPREFIX, 618, 178, 92, 24, 0);
+    let edt_path = mk_ctrl(
+        "EDIT",
+        "",
+        WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+        618,
+        202,
+        266,
+        32,
+        ID_EDT_PATH,
+    );
+    mk_ctrl(
+        "BUTTON",
+        "Browse",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        894,
+        201,
+        104,
+        34,
+        ID_BTN_BROWSE,
+    );
+    let btn_next_recent = mk_ctrl(
+        "BUTTON",
+        "Next recent",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        1006,
+        201,
+        116,
+        34,
+        ID_BTN_NEXT_RECENT,
+    );
+    let btn_apply = mk_ctrl(
+        "BUTTON",
+        "Set wallpaper",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        618,
+        254,
+        504,
+        46,
+        ID_BTN_APPLY,
+    );
+    let btn_pause_resume = mk_ctrl(
+        "BUTTON",
+        "Pause wallpaper",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        618,
+        314,
+        246,
+        42,
+        ID_BTN_PAUSE_RESUME,
+    );
+    let btn_stop = mk_ctrl(
+        "BUTTON",
+        "Stop",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        876,
+        314,
+        246,
+        42,
+        ID_BTN_STOP,
+    );
+    mk_ctrl(
+        "STATIC",
+        "LOCAL VIDEO · PREVIEW RUNS ONLY WHEN YOU ASK",
+        SS_NOPREFIX,
+        618,
+        374,
+        504,
+        24,
+        0,
+    );
+
+    mk_section("Playback", 42, 489, 116);
     let chk_mute = mk_ctrl(
         "BUTTON",
         "Mute audio",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         42,
-        365,
+        520,
         110,
         26,
         ID_CHK_MUTE,
@@ -1875,9 +1885,9 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Seamless loop",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
-        168,
-        365,
-        142,
+        160,
+        520,
+        130,
         26,
         ID_CHK_LOOP,
     );
@@ -1885,20 +1895,20 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Vol -",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        332,
-        361,
-        74,
+        294,
+        518,
+        72,
         32,
         ID_BTN_VOL_DOWN,
     );
-    let lbl_volume = mk_ctrl("STATIC", "0% volume", SS_NOPREFIX, 416, 366, 102, 24, 0);
+    let lbl_volume = mk_ctrl("STATIC", "0% volume", SS_NOPREFIX, 376, 523, 88, 24, 0);
     let btn_vol_up = mk_ctrl(
         "BUTTON",
         "Vol +",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        530,
-        361,
-        74,
+        470,
+        518,
+        90,
         32,
         ID_BTN_VOL_UP,
     );
@@ -1907,19 +1917,19 @@ fn create_child_controls(parent: HWND) {
         "Speed -",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         42,
-        410,
-        82,
+        564,
+        74,
         32,
         ID_BTN_SPEED_DOWN,
     );
-    let lbl_speed = mk_ctrl("STATIC", "1.00× speed", SS_NOPREFIX, 136, 415, 104, 24, 0);
+    let lbl_speed = mk_ctrl("STATIC", "1.00× speed", SS_NOPREFIX, 126, 569, 100, 24, 0);
     let btn_speed_up = mk_ctrl(
         "BUTTON",
         "Speed +",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        250,
-        410,
-        82,
+        234,
+        564,
+        74,
         32,
         ID_BTN_SPEED_UP,
     );
@@ -1927,21 +1937,21 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Scale: Fill",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        356,
-        410,
-        350,
+        326,
+        564,
+        234,
         34,
         ID_BTN_ASPECT,
     );
 
-    mk_section("Behavior", 782, 391, 108);
+    mk_section("Behavior", 618, 489, 108);
     let chk_fullscreen = mk_ctrl(
         "BUTTON",
         "Pause in full-screen apps",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
-        782,
-        419,
-        336,
+        618,
+        518,
+        504,
         24,
         ID_CHK_FULLSCREEN,
     );
@@ -1949,9 +1959,9 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Pause on battery power",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
-        782,
-        446,
-        336,
+        618,
+        543,
+        504,
         24,
         ID_CHK_BATTERY,
     );
@@ -1959,53 +1969,54 @@ fn create_child_controls(parent: HWND) {
         "BUTTON",
         "Launch Auralis at sign-in",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
-        782,
-        473,
-        336,
+        618,
+        568,
+        504,
         24,
         ID_CHK_STARTUP,
     );
 
-    mk_section("Engine status", 42, 542, 150);
+    let chk_reduce_motion = mk_ctrl(
+        "BUTTON",
+        "Reduce motion",
+        BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+        618,
+        593,
+        504,
+        24,
+        ID_CHK_REDUCE_MOTION,
+    );
+
+    mk_section("Engine status", 42, 647, 150);
     let lbl_status = mk_ctrl(
         "STATIC",
         "Wallpaper engine starting",
         SS_NOPREFIX,
         42,
-        568,
+        674,
         1074,
-        24,
+        22,
         0,
     );
-    let lbl_status_details = mk_ctrl("STATIC", "", SS_NOPREFIX, 42, 592, 1074, 60, 0);
-    let chk_reduce_motion = mk_ctrl(
-        "BUTTON",
-        "Reduce motion",
-        BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
-        42,
-        668,
-        204,
-        26,
-        ID_CHK_REDUCE_MOTION,
-    );
+    let lbl_status_details = mk_ctrl("STATIC", "", SS_NOPREFIX, 42, 698, 1074, 46, 0);
     mk_ctrl(
         "BUTTON",
         "Hide to tray",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        772,
-        662,
-        158,
-        42,
+        768,
+        759,
+        164,
+        40,
         ID_BTN_HIDE,
     );
     mk_ctrl(
         "BUTTON",
         "Quit & restore desktop",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        942,
-        662,
-        200,
-        42,
+        944,
+        759,
+        178,
+        40,
         ID_BTN_QUIT,
     );
 
@@ -2342,6 +2353,7 @@ fn update_enabled_controls() {
         );
         Some((
             state.edt_path,
+            state.lbl_preview_empty,
             [state.btn_apply, state.btn_preview],
             [state.btn_pause_resume, state.btn_stop],
             [
@@ -2365,6 +2377,7 @@ fn update_enabled_controls() {
 
     let Some((
         path_edit,
+        preview_empty,
         path_actions,
         wallpaper_actions,
         playback_controls,
@@ -2377,7 +2390,8 @@ fn update_enabled_controls() {
     else {
         return;
     };
-    let has_path = !read_edit_text(path_edit).trim().is_empty();
+    let selected_path = read_edit_text(path_edit);
+    let has_path = !selected_path.trim().is_empty();
     // SAFETY: Every handle belongs to a child control created with the Studio window.
     unsafe {
         for control in path_actions {
@@ -2391,6 +2405,19 @@ fn update_enabled_controls() {
         }
         EnableWindow(next_recent, i32::from(has_recent));
         EnableWindow(stop_preview, i32::from(has_preview));
+        if !has_preview && !preview_empty.is_null() {
+            let hint = preview_empty_hint(has_path);
+            let wide = wide_string(hint);
+            SetWindowTextW(preview_empty, wide.as_ptr());
+        }
+    }
+}
+
+fn preview_empty_hint(has_selected_path: bool) -> &'static str {
+    if has_selected_path {
+        "Preview is stopped to save resources\r\nSelect Preview when you are ready"
+    } else {
+        "Choose a video to see it in motion"
     }
 }
 
@@ -2881,18 +2908,18 @@ fn update_status_readout() {
 
         let recent_count = state.engine.config.recent_wallpapers.len();
         let tray_hint = if state.tray_added {
-            format!("System tray ready · {recent_count} recent wallpapers")
+            format!("Tray ready · {recent_count} recent")
         } else {
-            format!("Closing this window keeps playback active · {recent_count} recent wallpapers")
+            format!("Close keeps playback active · {recent_count} recent")
         };
 
         let details = if let Some(err) = &state.last_error {
             format!(
-                "{host_desc} · {video_meta} · {preview_desc}\r\n{perf_desc} · {power_desc}\r\nNotice · {err}"
+                "{host_desc} · {video_meta} · {preview_desc}\r\n{perf_desc} · {power_desc} · Notice: {err}"
             )
         } else {
             format!(
-                "{host_desc} · {video_meta} · {preview_desc}\r\n{perf_desc} · {power_desc}\r\n{tray_hint}"
+                "{host_desc} · {video_meta} · {preview_desc}\r\n{perf_desc} · {power_desc} · {tray_hint}"
             )
         };
         let status_line = format!("{state_desc}\r\n{details}");
@@ -2937,6 +2964,18 @@ fn update_status_readout() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_hint_explains_idle_and_selected_states() {
+        assert_eq!(
+            preview_empty_hint(false),
+            "Choose a video to see it in motion"
+        );
+        assert_eq!(
+            preview_empty_hint(true),
+            "Preview is stopped to save resources\r\nSelect Preview when you are ready"
+        );
+    }
 
     #[test]
     fn playback_status_shows_file_name_without_exposing_full_path() {
