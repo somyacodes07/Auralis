@@ -218,7 +218,7 @@ fn register_preview_surface_class(hinstance: *mut std::ffi::c_void) {
     let black_brush = unsafe { GetStockObject(BLACK_BRUSH) };
     let wnd_class = WNDCLASSW {
         style: 0,
-        lpfnWndProc: Some(DefWindowProcW),
+        lpfnWndProc: Some(preview_surface_proc),
         cbClsExtra: 0,
         cbWndExtra: 0,
         hInstance: hinstance,
@@ -230,6 +230,104 @@ fn register_preview_surface_class(hinstance: *mut std::ffi::c_void) {
     };
     // SAFETY: RegisterClassW registers the preview surface window class for this process.
     unsafe { RegisterClassW(&wnd_class) };
+}
+
+/// Paint a restrained play mark over the idle preview without starting a decoder.
+///
+/// The preview hint remains a separate native static control so its text stays available to UI
+/// Automation. This surface paint is intentionally static and only runs when the preview is idle.
+unsafe extern "system" fn preview_surface_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            let idle = GUI_STATE.with(|cell| {
+                cell.try_borrow()
+                    .ok()
+                    .and_then(|guard| guard.as_ref().map(|state| state.preview_player.is_none()))
+                    .unwrap_or(true)
+            });
+            if !idle {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
+
+            let mut paint: windows_sys::Win32::Graphics::Gdi::PAINTSTRUCT =
+                unsafe { mem::zeroed() };
+            let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
+            if hdc.is_null() {
+                return 0;
+            }
+
+            let mut client: RECT = unsafe { mem::zeroed() };
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client)
+            };
+            let (_, scale) = query_dpi_scale();
+            let center_x = (client.left + client.right) / 2;
+            let center_y = scale_px(104, scale);
+            let radius = scale_px(23, scale).max(18);
+            let background = unsafe { CreateSolidBrush(rgb(0, 0, 0)) };
+            if !background.is_null() {
+                unsafe {
+                    FillRect(hdc, &client, background);
+                    DeleteObject(background as HGDIOBJ);
+                }
+            }
+
+            let disc_brush = unsafe { CreateSolidBrush(rgb(20, 20, 21)) };
+            let disc_pen = unsafe { CreatePen(0, scale_px(1, scale).max(1), rgb(66, 66, 69)) };
+            if !disc_brush.is_null() && !disc_pen.is_null() {
+                unsafe {
+                    let old_brush = SelectObject(hdc, disc_brush as HGDIOBJ);
+                    let old_pen = SelectObject(hdc, disc_pen as HGDIOBJ);
+                    windows_sys::Win32::Graphics::Gdi::Ellipse(
+                        hdc,
+                        center_x - radius,
+                        center_y - radius,
+                        center_x + radius,
+                        center_y + radius,
+                    );
+                    SelectObject(hdc, old_brush);
+                    SelectObject(hdc, old_pen);
+                    DeleteObject(disc_brush as HGDIOBJ);
+                    DeleteObject(disc_pen as HGDIOBJ);
+                }
+            } else {
+                if !disc_brush.is_null() {
+                    unsafe { DeleteObject(disc_brush as HGDIOBJ) };
+                }
+                if !disc_pen.is_null() {
+                    unsafe { DeleteObject(disc_pen as HGDIOBJ) };
+                }
+            }
+
+            let glyph_pen = unsafe { CreatePen(0, scale_px(2, scale).max(1), rgb(210, 210, 212)) };
+            if !glyph_pen.is_null() {
+                unsafe {
+                    let old_pen = SelectObject(hdc, glyph_pen as HGDIOBJ);
+                    let left = center_x - scale_px(5, scale);
+                    let tip = center_x + scale_px(8, scale);
+                    let top = center_y - scale_px(8, scale);
+                    let bottom = center_y + scale_px(8, scale);
+                    MoveToEx(hdc, left, top, std::ptr::null_mut());
+                    LineTo(hdc, tip, center_y);
+                    LineTo(hdc, left, bottom);
+                    LineTo(hdc, left, top);
+                    SelectObject(hdc, old_pen);
+                    DeleteObject(glyph_pen as HGDIOBJ);
+                    EndPaint(hwnd, &paint);
+                }
+            } else {
+                unsafe { EndPaint(hwnd, &paint) };
+            }
+            0
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
 }
 
 /// Launch the native Windows Configuration UI and enter the Win32 message & playback loop.
@@ -1760,7 +1858,7 @@ fn create_child_controls(parent: HWND) {
         "Choose a video to see it in motion",
         SS_CENTER | SS_NOPREFIX,
         80,
-        226,
+        264,
         442,
         56,
         0,
@@ -2119,18 +2217,26 @@ fn start_in_app_preview(path: PathBuf) {
         // SAFETY: Toggles the noninteractive empty-state hint over the live preview surface.
         unsafe { ShowWindow(empty_state, if preview_active { SW_HIDE } else { SW_SHOW }) };
     }
+    // SAFETY: Redraws the static idle glyph when preview state changes; this does not start a decoder.
+    unsafe {
+        windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd_preview, std::ptr::null(), 1);
+    }
     update_enabled_controls();
 }
 
 fn stop_in_app_preview() {
-    let (old_preview, empty_state) = GUI_STATE.with(|cell| {
+    let (old_preview, empty_state, hwnd_preview) = GUI_STATE.with(|cell| {
         if let Ok(mut guard) = cell.try_borrow_mut() {
             if let Some(state) = guard.as_mut() {
                 state.preview_path = None;
-                return (state.preview_player.take(), state.lbl_preview_empty);
+                return (
+                    state.preview_player.take(),
+                    state.lbl_preview_empty,
+                    state.hwnd_preview,
+                );
             }
         }
-        (None, std::ptr::null_mut())
+        (None, std::ptr::null_mut(), std::ptr::null_mut())
     });
     if !empty_state.is_null() {
         // SAFETY: Restores the in-app preview hint after the media player is removed.
@@ -2139,6 +2245,12 @@ fn stop_in_app_preview() {
     if let Some(mut preview) = old_preview {
         preview.shutdown();
         WindowsPlatformAdapter::trim_process_working_set();
+    }
+    if !hwnd_preview.is_null() {
+        // SAFETY: The preview surface is a live child and must repaint its resource-saving idle state.
+        unsafe {
+            windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd_preview, std::ptr::null(), 1);
+        }
     }
     update_enabled_controls();
 }

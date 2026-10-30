@@ -4,7 +4,7 @@
 
 Auralis keeps the main workflow short: choose a display, open or drop a local video, preview it, then apply it. Recent wallpapers and the system tray make repeated use quick; loop, mute, volume, speed, aspect, full-screen pause, and battery pause remain close to the active wallpaper controls.
 
-The refreshed Windows Studio uses a restrained grayscale palette, larger action targets, grouped cards, a live preview, and a small playback indicator. Its indicator animates only while playback is active. **Reduce motion** persists in the configuration and disables that animation; Windows' client-animation accessibility setting also disables it. The animation does not touch or re-render wallpaper frames.
+The refreshed Windows Studio uses a restrained grayscale palette, larger action targets, grouped cards, a live preview, and a small playback indicator. The idle preview shows a static play mark and keeps its decoder stopped until the user requests playback. The playback indicator animates only while playback is active. **Reduce motion** persists in the configuration and disables that animation; Windows' client-animation accessibility setting also disables it. The animation does not touch or re-render wallpaper frames.
 
 Context labels and dividers group the controls, and hover feedback makes the custom actions easier to scan. Preview and apply actions stay disabled until a video path is entered; wallpaper playback and tuning controls stay disabled until a display has an active wallpaper. This keeps first-run actions clear and avoids controls that can only do nothing.
 
