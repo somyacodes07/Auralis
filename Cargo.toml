@@ -1,6 +1,6 @@
 [package]
 name = "auralis"
-version = "0.1.0-beta.1"
+version = "0.2.0-beta.1"
 edition = "2021"
 authors = ["somyacodes07 <ffsomyajeet@gmail.com>"]
 description = "A premium, Rust-first live wallpaper application for macOS and Windows"
@@ -16,7 +16,10 @@ serde_json = "1.0"
 version = "0.59"
 features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Controls_Dialogs",
     "Win32_UI_Shell",
     "Win32_Graphics_Gdi",
@@ -27,6 +30,7 @@ features = [
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_System_ProcessStatus",
+    "Win32_System_RemoteDesktop",
 ]
 
 [dev-dependencies]

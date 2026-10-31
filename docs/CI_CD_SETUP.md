@@ -1,77 +1,48 @@
-# Project Aurora — GitHub CI/CD Setup Notes
+# Auralis GitHub Actions
 
-This file complements `AGENTS.md` and [MULTI_AGENT_WORKFLOW.md](file:///c:/Users/Somyajeet/Code/Git/Auralis/docs/MULTI_AGENT_WORKFLOW.md). It describes the repository automation policy. Workflows are implemented in `.github/workflows/ci.yml` and `.github/workflows/release.yml`.
+The repository has two workflows:
 
-## Pull request and default-branch CI
+- [`ci.yml`](../.github/workflows/ci.yml) runs on pull requests targeting `main` and pushes to `main`.
+- [`release.yml`](../.github/workflows/release.yml) runs for tags beginning with `v`. It validates the tag before building and creates a draft release after both native builds finish.
 
-Create `.github/workflows/ci.yml` with:
+## Pull request and main-branch checks
 
-- Triggers: `pull_request` and `push` to the repository's actual default branch.
-- A macOS runner and a Windows runner for native compilation and platform-appropriate checks.
-- Stable Rust installed according to `rust-toolchain.toml`.
-- Cargo caching.
-- Formatting, Clippy, unit/integration tests, and release compilation.
-- Least-privilege token permissions (`contents: read` unless a job truly needs more).
-- `timeout-minutes` on jobs to prevent stuck runners.
-- Failure logs/artifacts when useful.
-- No secrets for ordinary test builds.
+The CI workflow uses least-privilege `contents: read` permissions and cancels older runs for the same ref. Formatting and patch hygiene run once; Windows and macOS each run Clippy, the workspace tests, and a release build on native hosted runners. Cargo is locked during native checks. The patch-hygiene job checks the actual PR or push range instead of the clean checkout diff.
 
-Start with the repository's supported toolchain and commands. If native linking or platform-specific dependencies mean a command differs per OS, use explicit matrix conditions rather than hiding failures.
+GitHub Actions are pinned to full commit SHAs. Dependabot checks the GitHub Actions ecosystem weekly and can propose reviewed pin updates.
 
-Example job steps to adapt after inspecting the workspace:
+These checks prove compilation and automated tests on the runners. They do not prove Windows `WorkerW` desktop layering, macOS wallpaper playback, or any other behavior that requires an interactive desktop acceptance test.
 
-```yaml
-- name: Check formatting
-  run: cargo fmt --all -- --check
+The Windows WorkerW lifecycle test runs in the active interactive console session with a visible shell desktop surface. A service, headless, or non-console session reports that prerequisite and skips only the desktop-layering assertions; an active console session still exercises the real host creation, resize, and teardown path.
 
-- name: Clippy
-  run: cargo clippy --workspace --all-targets -- -D warnings
+## Draft releases
 
-- name: Test
-  run: cargo test --workspace
+Only push a matching annotated SemVer tag after its commit is on the default branch. For example, when `Cargo.toml` declares `0.2.0-beta.1`:
 
-- name: Release build
-  run: cargo build --workspace --release
+```powershell
+git push origin main
+git tag -a v0.2.0-beta.1 -m "Auralis v0.2.0-beta.1"
+git push origin v0.2.0-beta.1
 ```
 
-Do not blindly use `--all-features` if features are mutually exclusive or unsupported on a target. Add appropriate target-specific conditions and document why.
+The workflow checks tag syntax, exact version alignment with `Cargo.toml`, and reachability from the repository's default branch. It then runs formatting, Clippy, tests, and release builds on Windows and macOS. Windows packaging produces an x64 ZIP and checksum. macOS packaging produces a single-architecture CLI tarball and checksum; it is not a universal binary or a wallpaper app. The final job has `contents: write` permission and creates a **draft**, which must be reviewed and published manually after platform acceptance testing.
 
-## Release workflow
+The current macOS build supports status and video validation only. Windows desktop behavior still requires manual testing with real video and desktop layering; the exact acceptance matrix should be expanded as supported Windows versions are established.
 
-Create a separate `.github/workflows/release.yml` only when packaging is genuinely ready. It should:
+## GitHub repository rules
 
-1. Trigger on a version tag such as `v0.1.0-beta.1` or `v0.1.0`.
-2. Verify the tag version matches the application's declared version.
-3. Re-run the required quality gates on supported native runners.
-4. Build platform-specific artifacts only on the appropriate runner.
-5. Attach checksums and useful build metadata.
-6. Publish a GitHub Release only through a deliberate, documented release job.
-7. Never auto-publish from ordinary branch pushes.
-8. Avoid code-signing secrets until signing is implemented and securely configured.
+Workflow YAML cannot enable branch protection. In GitHub repository settings, protect `main`, require pull requests, block force pushes and branch deletion, and require the four CI checks (`Code Formatting`, `Patch & Workspace Hygiene`, `Windows Native Verification`, and `macOS Native Verification`). Restrict creation of `v*` release tags to maintainers who can review releases. These repository settings were not changed by this code update.
 
-The exact packaging format is an implementation decision. Do not promise a signed/notarized macOS installer or a Windows installer until the required packaging and credentials have been tested.
+## Local verification
 
-## Post-push verification
+Run the canonical five-gate script before submitting or pushing code:
 
-After each authorized push, the coding agent should check the Actions run for the exact pushed commit, wait for required jobs when practical, and inspect failure logs. A successful `git push` does not mean CI passed.
-
-If the GitHub CLI is installed and authenticated, useful commands include:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
+```
 
 ```bash
-git status --short
-git rev-parse HEAD
-gh run list --commit "$(git rev-parse HEAD)"
-gh run watch
+bash scripts/verify.sh
 ```
 
-Use `gh run watch` only when the relevant run has been identified and the CLI is authenticated. Otherwise use the repository's connected GitHub tooling or report that post-push verification was unavailable.
-
-## Required branch protection (configure in GitHub settings)
-
-- Protect the default branch.
-- Require pull requests for changes when practical.
-- Require the CI checks that actually exist and are stable.
-- Block force pushes and branch deletion on the default branch.
-- Require review if the project has maintainers beyond the author.
-
-Branch protection is a repository setting; adding a YAML workflow alone does not enable it.
+Do not create a release tag or publish a draft until the version and changelog have been reviewed under the policy in [`AGENTS.md`](../AGENTS.md).

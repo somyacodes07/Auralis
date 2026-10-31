@@ -5,6 +5,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+- Added the Auralis SVG wordmark, live preview empty state, and a saved Reduce Motion option that follows Windows client-animation accessibility settings.
+
+### Changed
+- Redesigned the Windows Studio as a monochrome, card-based layout with custom native controls and a subtle grayscale playback indicator.
+- Reorganized the wallpaper, preview, playback, behavior, and resource telemetry panels and clarified first-run guidance.
+- Added restrained panel context labels, dividers, hover feedback, and state-based action availability so unavailable controls remain disabled until a source or wallpaper is ready.
+- Replaced unmeasured low-memory wording with separate Working Set and Private Bytes explanations and a repeatable resource measurement guide.
+
+## [0.2.0-beta.1] - 2026-10-13
+
+### Added
+- **Media Playback Lifecycle & Resource Telemetry (`src/platform/windows_player.rs`, `src/platform/windows.rs`, `src/platform/windows_gui.rs`)**:
+  - `MfVideoPlayer::load_and_play` stops and clears the previous media item before loading a replacement, and restores the previous working wallpaper if the replacement fails (`AGENTS.md` Principle 9). Actual decoder memory release depends on Media Foundation and the device; no fixed RAM reduction is claimed.
+  - Applying a wallpaper or cycling to a recent wallpaper stops the in-app preview player first, avoiding an extra preview decoder during the transition.
+  - `K32EmptyWorkingSet` asks Windows to trim resident process pages after media setup, when hiding the Studio, and periodically during idle background playback. This does not reduce Private Bytes or guarantee that the same pages remain nonresident.
+  - **Expanded Process Memory Telemetry**: Reports both OS **Working Set** (`WorkingSetSize`) and **Private Bytes** (`PagefileUsage`) in `auralis status` and the live Studio telemetry readout.
+- **Live Playback Speed & Aspect Ratio Scaling Controls (`src/config.rs`, `src/engine.rs`, `src/platform/windows_player.rs`, `src/platform/windows_gui.rs`)**:
+  - Live hardware playback speed adjustment (`0.25x` to `2.00x` in `0.25x` steps via `IMFPMediaPlayer::SetRate`) with persistence per display.
+  - Aspect ratio scaling toggle between **Fill (Stretch to Full Screen)** (`MFP_ASPECT_RATIO_NONE`) and **Fit (Preserve Aspect Ratio / Letterbox)** (`MFP_ASPECT_RATIO_PRESERVE_ASPECT_RATIO`) with immediate `UpdateVideo()` repaint.
+- **Recent Wallpapers History & One-Click Cycling (`src/config.rs`, `src/engine.rs`, `src/platform/windows_gui.rs`)**:
+  - Persists up to 10 recently validated and applied wallpapers in `AppConfig::recent_wallpapers` (Schema v2, backward-compatible with v1 configs).
+  - Added **Next recent** button in the Studio UI and **Next Recent Wallpaper** in the System Tray context menu to cycle through recent wallpapers with one click.
+- **Native macOS Platform Adapter (`src/platform/macos.rs`)**:
+  - Native `CoreGraphics` display enumeration (`CGGetActiveDisplayList`, `CGDisplayBounds`, `CGMainDisplayID`, `CGDisplayPixelsWide`, `CGDisplayPixelsHigh`).
+  - Native macOS battery and AC power telemetry (`pmset -g batt`), process memory/CPU metrics (`ps`), and LaunchAgent login startup management (`~/Library/LaunchAgents/com.auralis.wallpaper.plist`).
+
+### Fixed
+- Eliminated `RefCell` borrow re-entrancy crashes in `src/platform/windows_gui.rs` when clicking `Apply & Play Wallpaper` or changing wallpapers while the `WM_TIMER` loop or Media Foundation `SetMediaItem` inner message pump is active.
+
 ## [0.1.0-beta.1] - 2026-10-13
 
 ### Added

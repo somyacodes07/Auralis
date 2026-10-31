@@ -3,7 +3,7 @@
 //! Coordinates multi-display state, media playback controllers, power/fullscreen policies,
 //! and native platform adapters without coupling to OS-specific types.
 
-use crate::config::{AppConfig, DisplayWallpaperConfig};
+use crate::config::{AppConfig, DisplayWallpaperConfig, VideoAspectMode};
 use crate::media::MediaController;
 use crate::platform::{
     DisplayInfo, PlatformAdapter, PlatformError, PowerStatus, ProcessResourceMetrics,
@@ -143,6 +143,8 @@ impl WallpaperEngine {
         let muted = controller.muted;
         let volume = controller.volume;
         let loop_playback = controller.loop_playback;
+        let speed_percent = controller.speed_percent;
+        let aspect_mode = controller.aspect_mode;
 
         // Ensure native host window is created and layered behind desktop icons
         let hwnd = if let Some(&existing_hwnd) = self.host_windows.get(display_id) {
@@ -173,22 +175,70 @@ impl WallpaperEngine {
             return Err(err.to_string());
         }
 
+        let _ = self.adapter.set_video_aspect_mode(hwnd, aspect_mode);
+        let _ = self.adapter.set_video_playback_rate(hwnd, speed_percent);
+        self.adapter.trim_working_set();
+
         self.user_paused.remove(display_id);
 
-        // Record validated configuration
-        if let Ok(mut display_cfg) = DisplayWallpaperConfig::new(media_path) {
+        // Record validated configuration and recent wallpapers library
+        if let Ok(mut display_cfg) = DisplayWallpaperConfig::new(media_path.clone()) {
             display_cfg.muted = muted;
             display_cfg.volume = volume;
             display_cfg.loop_playback = loop_playback;
+            display_cfg.speed_percent = speed_percent;
+            display_cfg.aspect_mode = aspect_mode;
             self.config
                 .per_display
                 .insert(display.id.clone(), display_cfg.clone());
             if display.is_primary {
                 self.config.default_wallpaper = Some(display_cfg);
             }
+            self.config.record_recent_wallpaper(media_path);
         }
 
         Ok(())
+    }
+
+    /// Cycle to the next valid wallpaper in `self.config.recent_wallpapers` for `display_id`.
+    pub fn cycle_next_recent_wallpaper(&mut self, display_id: &str) -> Result<PathBuf, String> {
+        let valid_recents: Vec<PathBuf> = self
+            .config
+            .recent_wallpapers
+            .iter()
+            .filter(|p| p.exists())
+            .cloned()
+            .collect();
+
+        if valid_recents.is_empty() {
+            return Err("No recent wallpapers available in history.".to_string());
+        }
+
+        let current_path = self
+            .config
+            .per_display
+            .get(display_id)
+            .or(self.config.default_wallpaper.as_ref())
+            .map(|c| c.media_path.clone());
+
+        let next_path = if valid_recents.len() == 1 {
+            valid_recents[0].clone()
+        } else if let Some(cur) = current_path {
+            // Pick the first entry different from `cur` (and rotate `cur` to the back of `recent_wallpapers`)
+            let candidate = valid_recents
+                .iter()
+                .find(|p| **p != cur)
+                .cloned()
+                .unwrap_or_else(|| valid_recents[0].clone());
+            self.config.recent_wallpapers.retain(|p| p != &cur);
+            self.config.recent_wallpapers.push(cur);
+            candidate
+        } else {
+            valid_recents[0].clone()
+        };
+
+        self.apply_wallpaper(display_id, next_path.clone())?;
+        Ok(next_path)
     }
 
     /// Restore any previously configured wallpapers from `self.config`.
@@ -213,6 +263,8 @@ impl WallpaperEngine {
                     ctrl.set_muted(cfg.muted);
                     ctrl.set_volume(cfg.volume);
                     ctrl.set_loop(cfg.loop_playback);
+                    ctrl.set_speed_percent(cfg.speed_percent);
+                    ctrl.set_aspect_mode(cfg.aspect_mode);
                 }
                 let _ = self.apply_wallpaper(&id, cfg.media_path);
             }
@@ -252,6 +304,7 @@ impl WallpaperEngine {
         if let Some(hwnd) = self.host_windows.remove(display_id) {
             self.adapter.destroy_wallpaper_host_window(hwnd)?;
         }
+        self.adapter.trim_working_set();
         Ok(())
     }
 
@@ -291,6 +344,54 @@ impl WallpaperEngine {
         if let Some(default_cfg) = &mut self.config.default_wallpaper {
             default_cfg.loop_playback = loop_playback;
         }
+    }
+
+    /// Configure video playback speed percentage (`25..=200`, where `100` is `1.00x`) for a display.
+    pub fn set_display_playback_speed(
+        &mut self,
+        display_id: &str,
+        speed_percent: u16,
+    ) -> Result<(), PlatformError> {
+        let clamped = speed_percent.clamp(25, 200);
+        if let Some(controller) = self.controllers.get_mut(display_id) {
+            controller.set_speed_percent(clamped);
+        }
+        if let Some(cfg) = self.config.per_display.get_mut(display_id) {
+            cfg.speed_percent = clamped;
+        }
+        if let Some(default_cfg) = &mut self.config.default_wallpaper {
+            default_cfg.speed_percent = clamped;
+        }
+        if let Some(&hwnd) = self.host_windows.get(display_id) {
+            self.adapter.set_video_playback_rate(hwnd, clamped)?;
+        }
+        Ok(())
+    }
+
+    /// Configure video aspect-ratio scaling mode (`Fill` vs `Fit`) for a display.
+    pub fn set_display_aspect_mode(
+        &mut self,
+        display_id: &str,
+        aspect_mode: VideoAspectMode,
+    ) -> Result<(), PlatformError> {
+        if let Some(controller) = self.controllers.get_mut(display_id) {
+            controller.set_aspect_mode(aspect_mode);
+        }
+        if let Some(cfg) = self.config.per_display.get_mut(display_id) {
+            cfg.aspect_mode = aspect_mode;
+        }
+        if let Some(default_cfg) = &mut self.config.default_wallpaper {
+            default_cfg.aspect_mode = aspect_mode;
+        }
+        if let Some(&hwnd) = self.host_windows.get(display_id) {
+            self.adapter.set_video_aspect_mode(hwnd, aspect_mode)?;
+        }
+        Ok(())
+    }
+
+    /// Reclaim unused OS staging pages from the process working set.
+    pub fn trim_working_set(&self) {
+        self.adapter.trim_working_set();
     }
 
     /// Evaluate power and full-screen occlusion policies across all active displays.
@@ -404,6 +505,8 @@ impl WallpaperEngine {
                             ctrl.set_muted(cfg.muted);
                             ctrl.set_volume(cfg.volume);
                             ctrl.set_loop(cfg.loop_playback);
+                            ctrl.set_speed_percent(cfg.speed_percent);
+                            ctrl.set_aspect_mode(cfg.aspect_mode);
                         }
                         let _ = self.apply_wallpaper(&id, cfg.media_path);
                     }
@@ -418,6 +521,7 @@ impl WallpaperEngine {
                         let _ = self.adapter.pause_video_playback(hwnd);
                     }
                 }
+                self.adapter.trim_working_set();
             }
             PlatformEvent::SystemWoke => {
                 self.system_sleeping = false;
@@ -478,6 +582,7 @@ impl WallpaperEngine {
         for hwnd in handles {
             let _ = self.adapter.destroy_wallpaper_host_window(hwnd);
         }
+        self.adapter.trim_working_set();
     }
 }
 
@@ -736,5 +841,46 @@ mod tests {
         assert_eq!(destroyed.load(Ordering::SeqCst), 1);
 
         let _ = std::fs::remove_file(video);
+    }
+
+    #[test]
+    fn test_engine_speed_aspect_and_recent_cycling() {
+        let on_battery = Arc::new(AtomicBool::new(false));
+        let occluded = Arc::new(AtomicBool::new(false));
+        let created = Arc::new(AtomicUsize::new(0));
+        let destroyed = Arc::new(AtomicUsize::new(0));
+
+        let adapter = Box::new(MockPlatformAdapter {
+            on_battery,
+            occluded,
+            created_windows: created,
+            destroyed_windows: destroyed,
+        });
+
+        let mut engine = WallpaperEngine::new(AppConfig::default(), adapter).unwrap();
+        let v1 = create_temp_video("engine_cycle_1.mp4");
+        let v2 = create_temp_video("engine_cycle_2.mp4");
+
+        engine.apply_wallpaper("DISPLAY_1", v1.clone()).unwrap();
+        engine.apply_wallpaper("DISPLAY_1", v2.clone()).unwrap();
+
+        assert_eq!(engine.config.recent_wallpapers.len(), 2);
+        assert_eq!(engine.config.recent_wallpapers[0], v2);
+
+        // Cycle to next recent wallpaper -> switches back to v1
+        let cycled = engine.cycle_next_recent_wallpaper("DISPLAY_1").unwrap();
+        assert_eq!(cycled, v1);
+
+        // Set playback speed and aspect mode
+        engine.set_display_playback_speed("DISPLAY_1", 150).unwrap();
+        engine
+            .set_display_aspect_mode("DISPLAY_1", VideoAspectMode::Fit)
+            .unwrap();
+        let ctrl = engine.controller("DISPLAY_1").unwrap();
+        assert_eq!(ctrl.speed_percent, 150);
+        assert_eq!(ctrl.aspect_mode, VideoAspectMode::Fit);
+
+        let _ = std::fs::remove_file(v1);
+        let _ = std::fs::remove_file(v2);
     }
 }
