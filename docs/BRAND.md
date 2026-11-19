@@ -10,7 +10,7 @@ One memorable element, the mark. Everything around it stays quiet.
 - Do not use "Auralis Engine", "Auralis Live Wallpaper Studio", "Auralis Configuration Studio",
   "Auralis Wallpaper Engine" or other variants. Describe what it does in a sentence instead:
   "Auralis is a live video wallpaper app for Windows and macOS."
-- Version strings follow the name: `Auralis v0.2.0-beta.1`, `Auralis Studio · v0.2.0-beta.1`.
+- Version strings follow the name: `Auralis v1.0.0-rc.1`, `Auralis Studio · v1.0.0-rc.1`.
 - Sentence case for UI copy and artwork ("Drag Auralis to Applications").
 - "Project Aurora" is an internal codename in `AGENTS.md`; it never appears in the product.
 

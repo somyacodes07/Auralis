@@ -3,10 +3,10 @@ name: Build Release
 # Every push to the default branch (normally a merged pull request) is built on native Windows
 # and macOS runners and published as a numbered GitHub prerelease.
 #
-# Tag format: v<Cargo.toml version>-build.<N>, for example v0.2.0-beta.1-build.42.
+# Tag format: v<Cargo.toml version>-build.<N>, for example v1.0.0-rc.1-build.42.
 # <N> is this workflow's run number, so it increases with every build. The tag avoids "+"
 # (GitHub shows it as %2B in release URLs). Inside the app the version reads
-# 0.2.0-beta.1+build.42 (SemVer build metadata); Cargo.toml is never changed per build.
+# 1.0.0-rc.1+build.42 (SemVer build metadata); Cargo.toml is never changed per build.
 #
 # These are unsigned test builds. Maintainer releases still come from pushing a plain
 # v<version> tag, which release.yml turns into a reviewed draft release.

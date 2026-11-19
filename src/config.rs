@@ -168,6 +168,16 @@ pub struct AppConfig {
     /// replaced them and removed once restored.
     #[serde(default)]
     pub lock_screen_originals: HashMap<String, DesktopPicture>,
+    /// Check GitHub once a day and install newer builds automatically.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+    /// When the last automatic update check ran (seconds since the Unix epoch).
+    #[serde(default)]
+    pub last_update_check: Option<u64>,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -183,6 +193,8 @@ impl Default for AppConfig {
             reduce_motion: false,
             match_lock_screen: false,
             lock_screen_originals: HashMap::new(),
+            auto_update: true,
+            last_update_check: None,
         }
     }
 }
@@ -373,6 +385,16 @@ pub fn validate_media_file(path: &Path) -> Result<(), ConfigError> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn settings_from_before_updates_turn_automatic_updates_on() {
+        let json = r#"{"schema_version":1,"default_wallpaper":null,"per_display":{},
+            "pause_on_fullscreen":true,"pause_on_battery":false,"launch_at_startup":false}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.auto_update);
+        assert_eq!(config.last_update_check, None);
+        assert!(AppConfig::default().auto_update);
+    }
 
     #[test]
     fn test_default_config() {

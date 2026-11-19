@@ -18,6 +18,7 @@ use super::{
 use crate::config::{validate_media_file, DesktopPicture, VideoAspectMode};
 use crate::engine::WallpaperEngine;
 use crate::media::{MediaController, PlaybackState};
+use crate::update::{self, CheckOrigin, Relaunch, UpdateAgent, UpdateEvent};
 use crate::{AppConfig, PlatformEvent};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
@@ -105,7 +106,8 @@ extern "C" {
 }
 
 extern "C" {
-    fn auralis_macos_begin_menu(launch_at_login: u8);
+    fn auralis_macos_begin_menu(launch_at_login: u8, auto_update: u8);
+    fn auralis_macos_set_update_menu_state(checking: u8, auto_update: u8);
     fn auralis_macos_end_menu();
     fn auralis_macos_set_launch_menu_state(enabled: u8);
     fn auralis_macos_pump_events();
@@ -978,6 +980,10 @@ struct MacApp {
     user_paused: HashSet<String>,
     /// Still-frame desktop pictures for "Match lock screen to wallpaper".
     lock_screen: LockScreenSync,
+    /// Background update checks and downloads from GitHub Releases.
+    updater: UpdateAgent,
+    /// Last (checking, automatic) state pushed to the menu bar items.
+    pushed_update_menu: Option<(bool, bool)>,
     quit: bool,
 }
 
@@ -1038,6 +1044,81 @@ impl MacApp {
         }
         if report.config_changed {
             self.save_config();
+        }
+    }
+
+    /// Keep the update menu items in step with the agent and the setting.
+    fn push_update_menu(&mut self) {
+        let state = (self.updater.is_busy(), self.engine.config.auto_update);
+        if self.pushed_update_menu != Some(state) {
+            self.pushed_update_menu = Some(state);
+            // SAFETY: Updates two menu item titles/checkmarks on the AppKit main thread.
+            unsafe { auralis_macos_set_update_menu_state(u8::from(state.0), u8::from(state.1)) };
+        }
+    }
+
+    /// Start the daily automatic check when due and act on a finished check.
+    fn tick_updates(&mut self) {
+        let enabled = self.engine.config.auto_update && update::automatic_updates_supported();
+        self.updater
+            .tick(enabled, self.engine.config.last_update_check);
+        let finished = self.updater.poll();
+        self.push_update_menu();
+        let Some((origin, event)) = finished else {
+            return;
+        };
+        if origin == CheckOrigin::Automatic {
+            self.engine.config.last_update_check =
+                Some(update::unix_seconds(std::time::SystemTime::now()));
+            self.save_config();
+        }
+        let manual = origin == CheckOrigin::Manual;
+        match event {
+            UpdateEvent::UpToDate => {
+                if manual {
+                    show_native_message(
+                        "Auralis is up to date",
+                        &format!("You have {}.", update::ReleaseVersion::current().label()),
+                    );
+                }
+            }
+            UpdateEvent::Available(offer) => show_native_message(
+                &format!("Auralis {} is available", offer.version.label()),
+                "This copy of Auralis can't update itself. Download the new version from the Auralis website and drag it into Applications.",
+            ),
+            UpdateEvent::Ready(offer, file) => {
+                let relaunch = if manual || self.studio_open {
+                    Relaunch::Studio
+                } else {
+                    Relaunch::Minimized
+                };
+                match update::install(&offer, &file, relaunch) {
+                    Ok(()) => {
+                        crate::diagnostics::info(&format!(
+                            "Installed update {}; restarting",
+                            offer.version.label()
+                        ));
+                        // Quit the normal way (restoring desktop pictures and saving settings);
+                        // the new bundle opens once this process has exited.
+                        self.quit = true;
+                    }
+                    Err(error) => {
+                        crate::diagnostics::error(&format!("Update install failed: {error}"));
+                        if manual {
+                            show_native_message("Auralis couldn't update", &format!("{error}."));
+                        }
+                    }
+                }
+            }
+            UpdateEvent::Failed(error) => {
+                crate::diagnostics::warn(&format!("Update check failed: {error}"));
+                if manual {
+                    show_native_message(
+                        "Couldn't check for updates",
+                        &format!("{error}. Try again later."),
+                    );
+                }
+            }
         }
     }
 
@@ -1428,6 +1509,15 @@ impl MacApp {
             }
             StudioAction::SetLaunchAtLogin(enabled) => self.set_launch_at_login(enabled),
             StudioAction::OpenStudio => self.open_studio(),
+            StudioAction::CheckForUpdates => {
+                self.updater.start(CheckOrigin::Manual);
+                self.push_update_menu();
+            }
+            StudioAction::SetAutoUpdate(enabled) => {
+                self.engine.config.auto_update = enabled;
+                self.save_config();
+                self.push_update_menu();
+            }
             StudioAction::StudioClosed => {
                 // The bridge already released the preview player with the window.
                 self.studio_open = false;
@@ -1525,6 +1615,8 @@ pub fn run_macos_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> R
         pushed_reduce_motion: None,
         user_paused: HashSet::new(),
         lock_screen: LockScreenSync::new(lock_screen_directory(&config_path)),
+        updater: UpdateAgent::new(),
+        pushed_update_menu: None,
         quit: false,
     };
     app.push_reduce_motion();
@@ -1542,7 +1634,12 @@ pub fn run_macos_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> R
     }
 
     // SAFETY: Startup, event processing, and shutdown run on this process's main thread.
-    unsafe { auralis_macos_begin_menu(u8::from(app.engine.config.launch_at_startup)) };
+    unsafe {
+        auralis_macos_begin_menu(
+            u8::from(app.engine.config.launch_at_startup),
+            u8::from(app.engine.config.auto_update),
+        );
+    }
     if let Some(warning) = load_warning {
         show_native_message("Auralis recovered its settings", &warning);
     }
@@ -1569,6 +1666,10 @@ pub fn run_macos_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> R
         if let Err(error) = app.engine.tick() {
             app.report("Wallpaper playback stopped", &error.to_string());
             changed = true;
+        }
+        app.tick_updates();
+        if app.quit {
+            break;
         }
         tick_counter = tick_counter.wrapping_add(1);
         // Once a second (or right after an action) compare wallpapers with matched pictures.

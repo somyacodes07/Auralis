@@ -69,6 +69,10 @@ pub mod code {
     pub const NEXT_RECENT: i32 = 27;
     /// Studio: match the lock screen to the wallpaper with a still frame (value: 0 or 1).
     pub const SET_MATCH_LOCK_SCREEN: i32 = 28;
+    /// Menu: check GitHub for a newer build now.
+    pub const CHECK_FOR_UPDATES: i32 = 29;
+    /// Menu: install updates automatically (value: 0 or 1).
+    pub const SET_AUTO_UPDATE: i32 = 30;
 }
 
 /// Direction of a volume or speed step button.
@@ -139,6 +143,10 @@ pub enum StudioAction {
     NextRecent,
     /// Match the lock screen to the wallpaper with a still frame.
     SetMatchLockScreen(bool),
+    /// Check GitHub for a newer build now.
+    CheckForUpdates,
+    /// Install updates automatically.
+    SetAutoUpdate(bool),
 }
 
 fn decode_bool(value: i32) -> Option<bool> {
@@ -200,6 +208,8 @@ impl StudioAction {
             code::SET_REDUCE_MOTION => Self::SetReduceMotion(decode_bool(value)?),
             code::NEXT_RECENT => Self::NextRecent,
             code::SET_MATCH_LOCK_SCREEN => Self::SetMatchLockScreen(decode_bool(value)?),
+            code::CHECK_FOR_UPDATES => Self::CheckForUpdates,
+            code::SET_AUTO_UPDATE => Self::SetAutoUpdate(decode_bool(value)?),
             _ => return None,
         })
     }
@@ -210,7 +220,12 @@ impl StudioAction {
     pub const fn refreshes_studio(&self) -> bool {
         !matches!(
             self,
-            Self::SystemWillSleep | Self::SystemDidWake | Self::Quit | Self::StudioClosed
+            Self::SystemWillSleep
+                | Self::SystemDidWake
+                | Self::Quit
+                | Self::StudioClosed
+                | Self::CheckForUpdates
+                | Self::SetAutoUpdate(_)
         )
     }
 }
@@ -688,6 +703,15 @@ mod tests {
             StudioAction::decode(code::SET_MATCH_LOCK_SCREEN, 1, ""),
             Some(StudioAction::SetMatchLockScreen(true))
         );
+        assert_eq!(
+            StudioAction::decode(code::CHECK_FOR_UPDATES, 0, ""),
+            Some(StudioAction::CheckForUpdates)
+        );
+        assert_eq!(
+            StudioAction::decode(code::SET_AUTO_UPDATE, 0, ""),
+            Some(StudioAction::SetAutoUpdate(false))
+        );
+        assert_eq!(StudioAction::decode(code::SET_AUTO_UPDATE, 2, ""), None);
         assert_eq!(cg_display_number("CGDISPLAY69734272"), Some(69_734_272));
         assert_eq!(cg_display_number("DISPLAY1"), None);
         assert_eq!(cg_display_number("CGDISPLAYx"), None);
