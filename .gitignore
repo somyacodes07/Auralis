@@ -31,3 +31,6 @@ ehthumbs.db
 .env
 .env.*
 !.env.example
+
+# Python bytecode from asset scripts
+__pycache__/

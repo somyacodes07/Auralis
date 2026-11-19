@@ -64,24 +64,51 @@ static void AuralisQueueAction(int32_t action, NSString *path) {
     }
 }
 
+// Auralis mark on its 64-unit grid (y down). These mirror A_STROKE, WAVE_STROKE and
+// STROKE_WIDTH in src/brand.rs, the single source of truth; the Rust test
+// brand::tests::macos_template_image_matches_brand_geometry fails if they drift.
+static const CGFloat kAuralisMarkA[][2] = {
+    {13.0, 51.0}, {32.0, 13.0}, {51.0, 51.0},
+};
+static const CGFloat kAuralisMarkWave[][2] = {
+    {19.0, 39.0}, {20.3, 38.75}, {21.6, 38.06}, {22.9, 37.09}, {24.2, 36.1}, {25.5, 35.33},
+    {26.8, 35.0}, {28.1, 35.25}, {29.4, 36.1}, {30.7, 37.41}, {32.0, 39.0}, {33.3, 40.59},
+    {34.6, 41.9}, {35.9, 42.75}, {37.2, 43.0}, {38.5, 42.67}, {39.8, 41.9}, {41.1, 40.91},
+    {42.4, 39.94}, {43.7, 39.25}, {45.0, 39.0},
+};
+static const CGFloat kAuralisMarkStrokeWidth = 4.0;
+
+static void AuralisAppendPolyline(NSBezierPath *path, const CGFloat (*points)[2], size_t count,
+                                  CGFloat scale, CGFloat side) {
+    for (size_t i = 0; i < count; i++) {
+        // Center the grid in the image and flip y for AppKit's bottom-left origin.
+        NSPoint point = NSMakePoint(side / 2.0 + (points[i][0] - 32.0) * scale,
+                                    side / 2.0 - (points[i][1] - 32.0) * scale);
+        if (i == 0) {
+            [path moveToPoint:point];
+        } else {
+            [path lineToPoint:point];
+        }
+    }
+}
+
 static NSImage *AuralisMarkImage(void) {
-    NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(18.0, 18.0)];
+    // The inked mark spans 42 grid units (x 11..53 with stroke); fit it to 16 of the 18 pt
+    // menu-bar image, which gives a 1.5 pt stroke.
+    const CGFloat side = 18.0;
+    const CGFloat scale = 16.0 / 42.0;
+    NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(side, side)];
     [image lockFocus];
     [[NSColor whiteColor] setStroke];
 
     NSBezierPath *mark = [NSBezierPath bezierPath];
-    mark.lineWidth = 1.8;
+    mark.lineWidth = kAuralisMarkStrokeWidth * scale;
     mark.lineCapStyle = NSLineCapStyleRound;
     mark.lineJoinStyle = NSLineJoinStyleRound;
-    [mark moveToPoint:NSMakePoint(2.0, 2.0)];
-    [mark lineToPoint:NSMakePoint(9.0, 16.0)];
-    [mark lineToPoint:NSMakePoint(16.0, 2.0)];
-    [mark moveToPoint:NSMakePoint(4.2, 6.8)];
-    [mark lineToPoint:NSMakePoint(7.0, 6.8)];
-    [mark lineToPoint:NSMakePoint(8.4, 4.5)];
-    [mark lineToPoint:NSMakePoint(10.0, 10.0)];
-    [mark lineToPoint:NSMakePoint(11.4, 7.2)];
-    [mark lineToPoint:NSMakePoint(13.8, 7.2)];
+    AuralisAppendPolyline(mark, kAuralisMarkA, sizeof(kAuralisMarkA) / sizeof(kAuralisMarkA[0]),
+                          scale, side);
+    AuralisAppendPolyline(mark, kAuralisMarkWave,
+                          sizeof(kAuralisMarkWave) / sizeof(kAuralisMarkWave[0]), scale, side);
     [mark stroke];
     [image unlockFocus];
     image.template = YES;
@@ -156,7 +183,7 @@ void auralis_macos_begin_menu(uint8_t launchAtLogin) {
         AuralisMenuController *controller = [[AuralisMenuController alloc] init];
         controller.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
         controller.statusItem.button.image = AuralisMarkImage();
-        controller.statusItem.button.toolTip = @"Auralis live wallpaper";
+        controller.statusItem.button.toolTip = @"Auralis";
 
         NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Auralis"];
         [menu addItem:AuralisMenuItem(@"Set Primary Wallpaper…", @selector(chooseWallpaper:), controller)];

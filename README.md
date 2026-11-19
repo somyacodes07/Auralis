@@ -1,6 +1,9 @@
 # Auralis
 
-![Auralis live wallpaper](assets/auralis-logo.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/auralis-logo-dark.svg">
+  <img src="assets/auralis-logo.svg" alt="Auralis" height="64">
+</picture>
 
 A Rust-first live wallpaper application for **Windows** and **macOS**, built around native video playback and a quiet monochrome desktop experience.
 
@@ -22,7 +25,7 @@ A Rust-first live wallpaper application for **Windows** and **macOS**, built aro
 | Windows x64 | Native Studio UI, desktop wallpaper layering, hardware video playback, tray controls, and startup integration are implemented. CI builds and tests on Windows; desktop layering and playback still need manual acceptance testing on each supported Windows configuration. |
 | macOS | Native menu-bar app, AVFoundation video playback, multi-display host creation, LaunchAgent control, and sleep/wake/display-change handling are implemented. CI compiles and tests the native bridge; interactive desktop layering, media playback, and sleep/wake acceptance remain unverified. No macOS Studio window or preview is included. |
 
-For engineering and contribution guidance, see [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [docs/PLATFORM_TEST_MATRIX.md](docs/PLATFORM_TEST_MATRIX.md). The wordmark and app mark are [assets/auralis-logo.svg](assets/auralis-logo.svg) and [assets/auralis-mark.svg](assets/auralis-mark.svg); design and resource measurement notes are in [docs/UX_AND_PERFORMANCE.md](docs/UX_AND_PERFORMANCE.md).
+For engineering and contribution guidance, see [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [docs/PLATFORM_TEST_MATRIX.md](docs/PLATFORM_TEST_MATRIX.md). Brand rules, the mark geometry, and how the icons and installer art are generated are in [docs/BRAND.md](docs/BRAND.md); design and resource measurement notes are in [docs/UX_AND_PERFORMANCE.md](docs/UX_AND_PERFORMANCE.md).
 
 ## Usage & CLI Commands
 
