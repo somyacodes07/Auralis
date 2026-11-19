@@ -203,6 +203,12 @@ jobs:
           cargo build --workspace --release --all-features --locked --target aarch64-apple-darwin
           cargo build --workspace --release --all-features --locked --target x86_64-apple-darwin
 
+      - name: Install DMG Layout Tool
+        run: |
+          # create-dmg (MIT) lays out the Finder window: background, icon positions, volume icon.
+          brew install create-dmg
+          create-dmg --version
+
       - name: Package Universal DMG
         run: |
           VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")
@@ -210,7 +216,11 @@ jobs:
           ASSET_NAME="auralis-${ASSET_LABEL}-macos-universal"
           STAGE="dist/stage"
           APP_ROOT="${STAGE}/Auralis.app"
-          mkdir -p "${APP_ROOT}/Contents/MacOS" dist
+          mkdir -p "${APP_ROOT}/Contents/MacOS" "${APP_ROOT}/Contents/Resources" dist
+
+          # App icon from the committed iconset (scripts/generate_brand_assets.py).
+          iconutil -c icns assets/macos/AppIcon.iconset -o "${APP_ROOT}/Contents/Resources/Auralis.icns"
+          test -s "${APP_ROOT}/Contents/Resources/Auralis.icns"
 
           # One binary with arm64 and x86_64 slices.
           lipo -create \
@@ -231,6 +241,8 @@ jobs:
               <key>CFBundleDisplayName</key>
               <string>Auralis</string>
               <key>CFBundleExecutable</key>
+              <string>Auralis</string>
+              <key>CFBundleIconFile</key>
               <string>Auralis</string>
               <key>CFBundlePackageType</key>
               <string>APPL</string>
@@ -256,11 +268,40 @@ jobs:
           codesign --force --sign - --timestamp=none "${APP_ROOT}"
           codesign --verify --strict "${APP_ROOT}"
 
-          # Drag-to-install disk image: Auralis.app next to an Applications shortcut.
-          ln -s /Applications "${STAGE}/Applications"
-          hdiutil create -volname "Auralis" -srcfolder "${STAGE}" -fs HFS+ -format UDZO -ov \
-            "dist/${ASSET_NAME}.dmg"
+          # Drag-to-install disk image: Auralis.app on the left, an Applications link on the
+          # right, over the branded background (1x + 2x combined into one HiDPI TIFF). The icon
+          # positions match DMG_APP_X / DMG_LINK_X / DMG_ICON_Y in the asset generator.
+          # create-dmg drives Finder through AppleScript; if that fails the job fails rather
+          # than shipping an unstyled image.
+          tiffutil -cathidpicheck assets/macos/dmg-background.png assets/macos/dmg-background@2x.png \
+            -out dist/dmg-background.tiff
+          create-dmg \
+            --volname "Auralis" \
+            --volicon "${APP_ROOT}/Contents/Resources/Auralis.icns" \
+            --background dist/dmg-background.tiff \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 128 \
+            --text-size 13 \
+            --icon "Auralis.app" 160 168 \
+            --hide-extension "Auralis.app" \
+            --app-drop-link 440 168 \
+            "dist/${ASSET_NAME}.dmg" \
+            "${STAGE}"
+          rm -f dist/dmg-background.tiff
           hdiutil verify "dist/${ASSET_NAME}.dmg"
+
+          # Confirm the styled layout landed in the image: Finder view settings, background,
+          # volume icon, the app with its icon, and the Applications link.
+          MOUNT_DIR=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "${MOUNT_DIR}" "dist/${ASSET_NAME}.dmg"
+          ls -la "${MOUNT_DIR}" "${MOUNT_DIR}/.background"
+          test -f "${MOUNT_DIR}/.DS_Store"
+          test -f "${MOUNT_DIR}/.VolumeIcon.icns"
+          test -f "${MOUNT_DIR}/.background/dmg-background.tiff"
+          test -f "${MOUNT_DIR}/Auralis.app/Contents/Resources/Auralis.icns"
+          test -L "${MOUNT_DIR}/Applications"
+          hdiutil detach "${MOUNT_DIR}"
           (cd dist && shasum -a 256 "${ASSET_NAME}.dmg" > "${ASSET_NAME}.dmg.sha256")
           rm -rf "${STAGE}"
           ls -la dist

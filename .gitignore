@@ -34,3 +34,5 @@ ehthumbs.db
 
 # Local packaging output (installer/zip builds)
 /dist/
+# Python bytecode from asset scripts
+__pycache__/

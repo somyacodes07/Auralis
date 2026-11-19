@@ -74,10 +74,7 @@ fn main() -> ExitCode {
 }
 
 fn print_help() {
-    println!(
-        "Auralis Live Wallpaper Engine v{}",
-        auralis::version_label()
-    );
+    println!("Auralis v{}", auralis::version_label());
     println!("\nUsage:");
     println!("  auralis [gui] [file] [--minimized]   Launch the Auralis desktop app");
     println!(
@@ -111,7 +108,7 @@ fn run_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> ExitCode {
         match auralis::platform::windows_gui::run_windows_gui(initial_video, start_minimized) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("Error running Auralis Configuration Studio: {e}");
+                eprintln!("Error running Auralis Studio: {e}");
                 ExitCode::FAILURE
             }
         }
@@ -136,10 +133,7 @@ fn run_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> ExitCode {
 fn run_status() -> ExitCode {
     let caps = PlatformCapabilities::detect();
     println!("===============================================");
-    println!(
-        "  Auralis Live Wallpaper Engine v{}",
-        auralis::version_label()
-    );
+    println!("  Auralis v{}", auralis::version_label());
     println!("===============================================");
     println!("Platform:                  {}", caps.os_name);
     println!("Desktop Layering Native:   {}", caps.wallpaper_layering);
@@ -234,7 +228,7 @@ fn run_status() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("Error initializing Auralis Wallpaper Engine: {e}");
+            eprintln!("Error initializing Auralis: {e}");
             ExitCode::FAILURE
         }
     }

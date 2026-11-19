@@ -167,6 +167,7 @@ struct GuiState {
     last_status_text: String,
     tray_added: bool,
     brand_icon: windows_sys::Win32::UI::WindowsAndMessaging::HICON,
+    brand_icon_large: windows_sys::Win32::UI::WindowsAndMessaging::HICON,
     tick_counter: u32,
 }
 
@@ -261,71 +262,105 @@ fn centered_in_work_area(width: i32, height: i32) -> Option<(i32, i32, i32, i32)
         .then(|| center_in_rect(work, width, height))
 }
 
-fn point_segment_distance(point: (f32, f32), start: (f32, f32), end: (f32, f32)) -> f32 {
-    let (px, py) = point;
-    let (sx, sy) = start;
-    let (ex, ey) = end;
-    let dx = ex - sx;
-    let dy = ey - sy;
-    let length_squared = dx * dx + dy * dy;
-    let projection = if length_squared <= f32::EPSILON {
-        0.0
-    } else {
-        (((px - sx) * dx + (py - sy) * dy) / length_squared).clamp(0.0, 1.0)
-    };
-    let nearest_x = sx + projection * dx;
-    let nearest_y = sy + projection * dy;
-    ((px - nearest_x).powi(2) + (py - nearest_y).powi(2)).sqrt()
-}
-
-/// Rasterize the monochrome Auralis mark into a small icon shared by the title bar and tray.
-fn brand_icon_pixels() -> (Vec<u8>, Vec<u8>) {
-    const SIDE: usize = 32;
-    let mut color = vec![0u8; SIDE * SIDE * 4];
+/// Rasterize the Auralis tile (see `crate::brand`) as a `side`-px icon. Returns bottom-up BGRA
+/// pixels with straight alpha plus an all-clear AND mask.
+fn brand_icon_pixels(side: usize) -> (Vec<u8>, Vec<u8>) {
+    let rgba = crate::brand::render_mark(side, crate::brand::Backdrop::Tile);
+    let (pixels, _) = rgba.as_chunks::<4>();
+    // CreateIcon takes bottom-up rows of BGRA.
+    let color: Vec<u8> = pixels
+        .chunks(side)
+        .rev()
+        .flatten()
+        .flat_map(|&[r, g, b, a]| [b, g, r, a])
+        .collect();
     // CreateIcon expects each 1-bit mask scanline to be padded to a 16-bit boundary.
-    let mask_stride = SIDE.div_ceil(16) * 2;
-    let mask = vec![0u8; SIDE * mask_stride];
-    let wave = [
-        (11.0, 20.0),
-        (14.0, 18.0),
-        (16.0, 22.0),
-        (18.0, 17.0),
-        (21.0, 20.0),
-    ];
-
-    for y in 0..SIDE {
-        for x in 0..SIDE {
-            let xf = x as f32 + 0.5;
-            let yf = y as f32 + 0.5;
-            let rounded_x = xf.clamp(6.0, 26.0) - xf;
-            let rounded_y = yf.clamp(6.0, 26.0) - yf;
-            if rounded_x * rounded_x + rounded_y * rounded_y > 36.0 {
-                continue;
-            }
-
-            let on_a = point_segment_distance((xf, yf), (8.0, 25.0), (16.0, 7.0)) <= 1.6
-                || point_segment_distance((xf, yf), (16.0, 7.0), (24.0, 25.0)) <= 1.6;
-            let on_wave = wave.windows(2).any(|segment| {
-                point_segment_distance(
-                    (xf, yf),
-                    (segment[0].0, segment[0].1),
-                    (segment[1].0, segment[1].1),
-                ) <= 1.35
-            });
-            let offset = ((SIDE - 1 - y) * SIDE + x) * 4;
-            let shade = if on_a || on_wave { 242 } else { 24 };
-            color[offset..offset + 4].copy_from_slice(&[shade, shade, shade, 255]);
-        }
-    }
+    let mask = vec![0u8; side * side.div_ceil(16) * 2];
     (color, mask)
 }
 
+/// Paint the bare Auralis mark, anti-aliased, into a `size` px square at (`left`, `top`) over
+/// an opaque `background`. Coordinates come from `crate::brand`, like the app icon.
+///
+/// # Safety
+/// `hdc` must be a valid device context for the duration of the call.
+unsafe fn paint_brand_mark(
+    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+    left: i32,
+    top: i32,
+    size: i32,
+    background: [u8; 3],
+) {
+    use windows_sys::Win32::Graphics::Gdi::{
+        SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    };
+    let Ok(side) = usize::try_from(size) else {
+        return;
+    };
+    let rgba = crate::brand::render_mark(side, crate::brand::Backdrop::Solid(background));
+    // A top-down 32-bit DIB wants BGRX rows.
+    let bgrx: Vec<u8> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, _]| [b, g, r, 0])
+        .collect();
+    let mut info: BITMAPINFO = mem::zeroed();
+    info.bmiHeader = BITMAPINFOHEADER {
+        biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: size,
+        biHeight: -size,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        ..mem::zeroed()
+    };
+    SetDIBitsToDevice(
+        hdc,
+        left,
+        top,
+        size as u32,
+        size as u32,
+        0,
+        0,
+        0,
+        size as u32,
+        bgrx.as_ptr().cast(),
+        &info,
+        DIB_RGB_COLORS,
+    );
+}
+
+/// The Auralis icon at `metric` size (`SM_CXICON` or `SM_CXSMICON`): the hand-tuned
+/// `assets/auralis.ico` embedded as resource 1 by build.rs, or, when the executable has no icon
+/// resource (for example a local GNU build without windres), the same mark rasterized now.
 fn create_brand_icon(
     hinstance: *mut std::ffi::c_void,
+    metric: windows_sys::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX,
 ) -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
-    let (color, mask) = brand_icon_pixels();
-    // SAFETY: The icon buffers have correctly sized 32x32 BGRA pixels and padded AND-mask rows.
-    unsafe { CreateIcon(hinstance, 32, 32, 1, 32, mask.as_ptr(), color.as_ptr()) }
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, LoadImageW, IMAGE_ICON, LR_DEFAULTCOLOR,
+    };
+    // SAFETY: GetSystemMetrics reads a system icon dimension.
+    let side = unsafe { GetSystemMetrics(metric) }.clamp(16, 256);
+    // SAFETY: MAKEINTRESOURCE(1) names the icon group in this module; LoadImageW returns null
+    // when it is absent, and the caller owns (and destroys) the returned icon.
+    let loaded = unsafe {
+        LoadImageW(
+            hinstance,
+            std::ptr::without_provenance::<u16>(1), // MAKEINTRESOURCEW(1)
+            IMAGE_ICON,
+            side,
+            side,
+            LR_DEFAULTCOLOR,
+        )
+    };
+    if !loaded.is_null() {
+        return loaded;
+    }
+    let (color, mask) = brand_icon_pixels(side as usize);
+    // SAFETY: The buffers hold side x side BGRA pixels and AND-mask rows padded to 16 bits.
+    unsafe { CreateIcon(hinstance, side, side, 1, 32, mask.as_ptr(), color.as_ptr()) }
 }
 
 const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
@@ -618,6 +653,7 @@ pub fn run_windows_gui(
                 last_status_text: String::new(),
                 tray_added: false,
                 brand_icon: std::ptr::null_mut(),
+                brand_icon_large: std::ptr::null_mut(),
                 tick_counter: 0,
             });
         }
@@ -627,11 +663,21 @@ pub fn run_windows_gui(
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
     register_preview_surface_class(hinstance);
 
-    let brand_icon = create_brand_icon(hinstance);
+    // The small icon serves the tray; the large one the window class (Windows derives the
+    // caption icon from it).
+    let brand_icon = create_brand_icon(
+        hinstance,
+        windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSMICON,
+    );
+    let brand_icon_large = create_brand_icon(
+        hinstance,
+        windows_sys::Win32::UI::WindowsAndMessaging::SM_CXICON,
+    );
     GUI_STATE.with(|cell| {
         if let Ok(mut guard) = cell.try_borrow_mut() {
             if let Some(state) = guard.as_mut() {
                 state.brand_icon = brand_icon;
+                state.brand_icon_large = brand_icon_large;
             }
         }
     });
@@ -642,10 +688,10 @@ pub fn run_windows_gui(
             LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
         )
     };
-    let hicon = if brand_icon.is_null() {
+    let hicon = if brand_icon_large.is_null() {
         fallback_icon
     } else {
-        brand_icon
+        brand_icon_large
     };
 
     let wnd_class = WNDCLASSW {
@@ -707,7 +753,7 @@ pub fn run_windows_gui(
     };
 
     if hwnd.is_null() {
-        return Err("Failed to create Auralis Configuration Studio window".to_string());
+        return Err("Failed to create the Auralis Studio window".to_string());
     }
 
     // Honor Windows dark mode for the native title bar when the OS supports the DWM attribute.
@@ -770,9 +816,12 @@ pub fn run_windows_gui(
                         unsafe { DeleteObject(object) };
                     }
                 }
-                if !state.brand_icon.is_null() {
-                    // SAFETY: The app-owned tray icon was removed in WM_DESTROY before shutdown.
-                    unsafe { DestroyIcon(state.brand_icon) };
+                for icon in [state.brand_icon, state.brand_icon_large] {
+                    if !icon.is_null() {
+                        // SAFETY: The app-owned icons are no longer used: the tray icon was
+                        // removed in WM_DESTROY and the window is gone.
+                        unsafe { DestroyIcon(icon) };
+                    }
                 }
             }
         }
@@ -801,7 +850,8 @@ fn add_tray_icon(hwnd: HWND) {
         .unwrap_or_else(|| unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) });
 
     let tip = wide_string(&format!(
-        "Auralis Live Wallpaper Studio v{} (Right-click for controls)",
+        "Auralis v{}
+Right-click for controls",
         crate::version_label()
     ));
     let copy_len = tip.len().min(nid.szTip.len() - 1);
@@ -929,22 +979,17 @@ fn paint_main_window(hwnd: HWND) {
         SelectObject(hdc, old_brush);
         SelectObject(hdc, old_pen);
 
-        // A compact geometric A mark echoes the standalone SVG wordmark.
-        let mark_pen = CreatePen(0, px(2).max(1), rgb(232, 232, 234));
-        if !mark_pen.is_null() {
-            let old_mark_pen = SelectObject(hdc, mark_pen as HGDIOBJ);
-            MoveToEx(hdc, px(24), px(40), std::ptr::null_mut());
-            LineTo(hdc, px(36), px(15));
-            LineTo(hdc, px(48), px(40));
-            MoveToEx(hdc, px(28), px(32), std::ptr::null_mut());
-            LineTo(hdc, px(32), px(32));
-            LineTo(hdc, px(36), px(25));
-            LineTo(hdc, px(40), px(36));
-            LineTo(hdc, px(44), px(29));
-            LineTo(hdc, px(47), px(29));
-            SelectObject(hdc, old_mark_pen);
-            DeleteObject(mark_pen as HGDIOBJ);
-        }
+        // The brand mark on a 36px grid square over the window background (13, 13, 14), vertically
+        // centered in the header; its inked
+        // part spans x 24..48 so the wordmark at x 60 keeps a 12px gap.
+        let mark_size = px(36);
+        paint_brand_mark(
+            hdc,
+            px(18),
+            (px(HEADER_HEIGHT) - mark_size) / 2,
+            mark_size,
+            [13, 13, 14],
+        );
 
         SetBkMode(hdc, TRANSPARENT as i32);
         let old_font = if snap.heading_font.is_null() {
@@ -3412,19 +3457,15 @@ mod tests {
 
     #[test]
     fn brand_icon_is_a_contrasting_32_bit_monochrome_mark() {
-        let (pixels, mask) = brand_icon_pixels();
+        let (pixels, mask) = brand_icon_pixels(32);
         assert_eq!(pixels.len(), 32 * 32 * 4);
         assert_eq!(mask.len(), 32 * 4);
-        assert!(pixels.iter().step_by(4).any(|shade| *shade == 242));
-        assert!(pixels.iter().step_by(4).any(|shade| *shade == 24));
+        // Byte 0 of each BGRA pixel is blue.
+        let [.., tile] = crate::brand::TILE_COLOR;
+        let [.., ink] = crate::brand::MARK_COLOR;
+        assert!(pixels.iter().step_by(4).any(|shade| *shade == ink));
+        assert!(pixels.iter().step_by(4).any(|shade| *shade == tile));
         assert!(pixels.iter().skip(3).step_by(4).any(|alpha| *alpha == 0));
-    }
-
-    #[test]
-    fn icon_vector_distance_handles_zero_length_segments() {
-        assert!(
-            (point_segment_distance((2.0, 3.0), (1.0, 1.0), (1.0, 1.0)) - 2.236068).abs() < 0.001
-        );
     }
 
     #[test]
