@@ -127,11 +127,46 @@ jobs:
       - name: Release Build
         run: cargo build --workspace --release --all-features --locked
 
+  changes:
+    name: Detect Docs-Only Changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compare with the base branch
+        id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Docs-only means every changed file is Markdown, under docs/, or under site/.
+          # Anything else (code, workflows, assets, installer, license texts) still packages.
+          CHANGED=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          echo "Changed files:"
+          echo "$CHANGED"
+          if [ -z "$CHANGED" ] || echo "$CHANGED" | grep -qvE '(\.md$|^docs/|^site/)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "Code or packaging inputs changed: installers will be built."
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "Docs-only change: skipping installer packaging."
+          fi
+
   package:
     name: Package Installers
     # Proves the Windows zip and macOS DMG still build before merge. Artifacts are attached to
     # the workflow run only; nothing is published. Pushes to main package in build-release.yml.
-    if: github.event_name == 'pull_request'
+    # Skipped for docs-only pull requests (see the changes job).
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
     uses: ./.github/workflows/package.yml
     with:
       asset_label: pr-${{ github.event.pull_request.number }}
