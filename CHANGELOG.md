@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Added
+- Added an opt-in macOS setting, **Match lock screen to wallpaper**. It sets a still frame from the wallpaper video as the desktop picture, so the lock screen and Mission Control match it, and restores the original picture when turned off, when the wallpaper stops, or on Quit. macOS does not allow video on the lock screen. Windows lock screen matching is not available yet.
 - Added a macOS Studio window, opened from **Open Auralis Studio…** (Cmd-,) in the menu bar and on launch when no wallpaper is running. It mirrors the Windows Studio: display selection, Browse, drag and drop, Next recent, an on-demand preview, Set as wallpaper, pause/resume, stop, mute, loop, volume, speed, Fill/Fit, behavior settings, and live status. Closing it keeps the wallpaper running. Not yet tested on a real Mac.
 - macOS now pauses for full-screen apps (on-screen window list) and reads battery state through IOKit, and reports process memory, CPU time, and wallpaper resolution/position.
 - macOS builds now ship as one universal (Apple Silicon and Intel) `.dmg` with drag-to-Applications install, replacing the single-architecture `.app.zip` and CLI `.tar.gz`. The app is ad-hoc signed and requires macOS 13 or later.

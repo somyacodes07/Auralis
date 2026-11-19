@@ -67,6 +67,8 @@ pub mod code {
     pub const SET_REDUCE_MOTION: i32 = 26;
     /// Studio: cycle the selected display to the next recent wallpaper.
     pub const NEXT_RECENT: i32 = 27;
+    /// Studio: match the lock screen to the wallpaper with a still frame (value: 0 or 1).
+    pub const SET_MATCH_LOCK_SCREEN: i32 = 28;
 }
 
 /// Direction of a volume or speed step button.
@@ -135,6 +137,8 @@ pub enum StudioAction {
     SetReduceMotion(bool),
     /// Cycle the selected display to the next recent wallpaper.
     NextRecent,
+    /// Match the lock screen to the wallpaper with a still frame.
+    SetMatchLockScreen(bool),
 }
 
 fn decode_bool(value: i32) -> Option<bool> {
@@ -195,6 +199,7 @@ impl StudioAction {
             code::SET_PAUSE_ON_BATTERY => Self::SetPauseOnBattery(decode_bool(value)?),
             code::SET_REDUCE_MOTION => Self::SetReduceMotion(decode_bool(value)?),
             code::NEXT_RECENT => Self::NextRecent,
+            code::SET_MATCH_LOCK_SCREEN => Self::SetMatchLockScreen(decode_bool(value)?),
             _ => return None,
         })
     }
@@ -477,6 +482,8 @@ pub struct StudioView {
     pub reduce_motion: bool,
     /// Whether the preview player is running.
     pub preview_active: bool,
+    /// Match lock screen to wallpaper.
+    pub match_lock_screen: bool,
 }
 
 /// Saved behavior settings shown as checkboxes.
@@ -491,6 +498,8 @@ pub struct BehaviorSettings {
     pub launch_at_login: bool,
     /// Reduce motion.
     pub reduce_motion: bool,
+    /// Match lock screen to wallpaper.
+    pub match_lock_screen: bool,
 }
 
 /// Inputs for [`StudioView::build`], gathered from the engine by the macOS adapter.
@@ -565,8 +574,15 @@ impl StudioView {
             launch_at_login: snapshot.behavior.launch_at_login,
             reduce_motion: snapshot.behavior.reduce_motion,
             preview_active: snapshot.preview.is_some(),
+            match_lock_screen: snapshot.behavior.match_lock_screen,
         }
     }
+}
+
+/// The `CGDirectDisplayID` encoded in a macOS display id such as `CGDISPLAY69734272`.
+#[must_use]
+pub fn cg_display_number(display_id: &str) -> Option<u32> {
+    display_id.strip_prefix("CGDISPLAY")?.parse().ok()
 }
 
 /// Window rectangle in global display coordinates (top-left origin, as `CGWindowListCopyWindowInfo`
@@ -668,6 +684,13 @@ mod tests {
             StudioAction::decode(code::NEXT_RECENT, 0, ""),
             Some(StudioAction::NextRecent)
         );
+        assert_eq!(
+            StudioAction::decode(code::SET_MATCH_LOCK_SCREEN, 1, ""),
+            Some(StudioAction::SetMatchLockScreen(true))
+        );
+        assert_eq!(cg_display_number("CGDISPLAY69734272"), Some(69_734_272));
+        assert_eq!(cg_display_number("DISPLAY1"), None);
+        assert_eq!(cg_display_number("CGDISPLAYx"), None);
         assert_eq!(StudioAction::decode(0, 0, ""), None);
         assert_eq!(StudioAction::decode(999, 0, ""), None);
     }

@@ -7,6 +7,7 @@ use crate::config::VideoAspectMode;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub mod lock_screen;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod macos_studio;

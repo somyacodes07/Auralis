@@ -13,13 +13,13 @@ Record OS version, device model, display layout, video codec/profile/resolution/
 
 | Date | Platform | Build | Result | Notes |
 | --- | --- | --- | --- | --- |
-| 2026-11-19 | macOS 15 (Sequoia) or newer, Apple Silicon (exact version and model to be recorded) | `main` before the host-visibility fix (menu-bar app) | **FAIL** | User report: after selecting a video from the menu bar, the original desktop picture stays unchanged (no black window, no error). Cause found in code: the AppKit host window was created but never ordered on screen, and its level matched the system desktop picture. Fix pending user retest. |
-| 2026-11-19 | macOS 15 or newer, Apple Silicon, built-in display 1710 × 1112, on battery with Low Power Mode | PR #13 integration build (host-visibility fix and Studio) | **PARTIAL** | The wallpaper window is now visible, so the visibility fix works. The desktop stayed black: Pause on battery power paused the just-applied wallpaper before its first frame, and a paused replacement was never promoted. Studio layout overflowed the right edge and used the system accent color. Fixed in `feat/macos-studio`; pending user retest. |
+| 2026-11-19 | macOS 15 (Sequoia) or newer, Apple Silicon | `main` before the host-visibility fix (menu-bar app) | **FAIL** (since fixed) | User report: after selecting a video, the original desktop picture stayed unchanged. Cause: the AppKit host window was created but never ordered on screen, at the same level as the system desktop picture. Fixed in `feat/macos-studio` (commit a5a62f4). |
+| 2026-11-19 | macOS 15 or newer, Apple Silicon, built-in display 1710 × 1112 | PR #13 integration build (host-visibility fix and Studio) | **PASS** | User report: the wallpaper is visible and plays behind desktop icons. A black desktop seen in one run came from Pause on battery power (Low Power Mode on); later builds show the paused wallpaper's first frame and name the pause reason. |
 
 ## Current status
 
 - Windows desktop layering and playback code are implemented. Per-release interactive acceptance remains required across supported Windows configurations.
-- macOS now has a native menu-bar controller, AVFoundation player, AppKit host, and lifecycle hooks. The native path compiles in CI. The first real-Mac report (above) failed: the wallpaper never became visible. The host-visibility fix still needs a retest on that Mac.
+- macOS has a native menu-bar controller, AVFoundation player, AppKit host, and lifecycle hooks. After the host-visibility fix, the wallpaper was confirmed visible and playing on one Apple Silicon Mac (macOS 15+). Other Macs, multi-display layouts, and sleep/wake still need acceptance testing.
 - To diagnose a macOS host on a real Mac, run `/Applications/Auralis.app/Contents/MacOS/Auralis verify-desktop` in Terminal and include its `Host window:` line (window number, level, frame, visibility, active Space) in the test record.
 - macOS now has a Studio window (NOT VERIFIED on a real Mac). Full-screen detection uses the on-screen window list and may pause for any other app's window that covers the whole display, including borderless overlays.
 
@@ -37,3 +37,7 @@ Run on a real Mac with the `.app` from the DMG. Record macOS version, chip, and 
 8. Behavior: with **Pause while a full-screen app is open**, put an app in full screen on the wallpaper's display and confirm the wallpaper pauses and resumes after leaving full screen. With **Pause on battery power**, unplug the charger and confirm a pause within a few seconds. **Launch at login** creates or removes `~/Library/LaunchAgents/com.auralis.wallpaper.plist` and matches the menu checkmark. **Reduce motion** removes the wallpaper fade-in.
 9. The status block shows the file name only, resolution and position, memory footprint, CPU time, and power source.
 10. VoiceOver reads every control, including the volume and speed step buttons.
+11. Lock screen: turn on **Match lock screen to wallpaper** with a wallpaper running. Within a second, the desktop picture (visible in Mission Control and on the lock screen, Ctrl-Cmd-Q) shows a still frame of the video, filled or fitted like the wallpaper. A JPEG appears in `~/Library/Application Support/Auralis/lock-screen/`.
+12. Change the wallpaper or Fill/Fit: the still updates and the previous JPEG is deleted.
+13. Restore: turning the setting off, **Stop wallpaper**, and **Quit Auralis** each bring back the exact original desktop picture (including its scaling and fill color), and remove the JPEG. After a force-quit the still stays; relaunching with the setting off restores the original.
+14. Known limits to note: `setDesktopImageURL` changes the picture for the current Space only, and a dynamic or aerial wallpaper may come back as its static image.

@@ -45,6 +45,7 @@ enum {
     AuralisActionSetPauseOnBattery = 25,
     AuralisActionSetReduceMotion = 26,
     AuralisActionNextRecent = 27,
+    AuralisActionSetMatchLockScreen = 28,
 };
 
 // Must match `NativeStudioState` in `src/platform/macos.rs`.
@@ -64,6 +65,7 @@ typedef struct {
     uint8_t launchAtLogin;
     uint8_t reduceMotion;
     uint8_t previewActive;
+    uint8_t matchLockScreen;
 } AuralisStudioState;
 
 // Must match `NativeRect` in `src/platform/macos.rs`.
@@ -1113,6 +1115,7 @@ void auralis_macos_set_reduce_motion(uint8_t enabled) {
 @property(nonatomic, strong) NSButton *batteryCheckbox;
 @property(nonatomic, strong) NSButton *loginCheckbox;
 @property(nonatomic, strong) NSButton *motionCheckbox;
+@property(nonatomic, strong) NSButton *lockScreenCheckbox;
 @property(nonatomic, strong) NSTextField *statusLabel;
 @property(nonatomic, strong) NSTextField *detailsLabel;
 @property(nonatomic, strong) NSTextField *resourcesLabel;
@@ -1306,6 +1309,16 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
     self.batteryCheckbox = [self checkbox:@"Pause on battery power" action:@selector(setPauseOnBattery:)];
     self.loginCheckbox = [self checkbox:@"Launch at login" action:@selector(setLaunchAtLogin:)];
     self.motionCheckbox = [self checkbox:@"Reduce motion" action:@selector(setReduceMotion:)];
+    self.lockScreenCheckbox = [self checkbox:@"Match lock screen to wallpaper" action:@selector(setMatchLockScreen:)];
+    // Keep in sync with `HELP_TEXT` in src/platform/lock_screen.rs.
+    NSString *lockScreenHelpText =
+        @"Uses a still frame from your video; macOS does not allow moving wallpapers on the lock screen.";
+    self.lockScreenCheckbox.toolTip = lockScreenHelpText;
+    NSTextField *lockScreenHelp = AuralisWrappingLabel(lockScreenHelpText, NO, YES, AuralisPreviewWidth - 20.0);
+    [lockScreenHelp.widthAnchor constraintEqualToConstant:AuralisPreviewWidth - 20.0].active = YES;
+    // Indent the help text to the checkbox title.
+    NSStackView *lockScreenHelpRow = AuralisRow(@[lockScreenHelp]);
+    lockScreenHelpRow.edgeInsets = NSEdgeInsetsMake(0.0, 20.0, 0.0, 0.0);
 
     // Status
     self.statusLabel = AuralisWrappingLabel(@"No wallpaper running", YES, NO, AuralisPreviewWidth);
@@ -1330,6 +1343,8 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
         self.batteryCheckbox,
         self.loginCheckbox,
         self.motionCheckbox,
+        self.lockScreenCheckbox,
+        lockScreenHelpRow,
         self.statusLabel,
         self.detailsLabel,
         self.resourcesLabel,
@@ -1341,11 +1356,13 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
     stack.spacing = 8.0;
     stack.edgeInsets = NSEdgeInsetsMake(AuralisGutter, AuralisGutter, AuralisGutter, AuralisGutter);
     // 8 px rhythm: 8 inside a group, 24 before each section heading and the status block.
-    NSArray<NSView *> *groupEnds = @[sections[2], sections[6], sections[9], sections[14]];
+    NSArray<NSView *> *groupEnds = @[sections[2], sections[6], sections[9], sections[16]];
     for (NSView *view in groupEnds) {
         [stack setCustomSpacing:24.0 afterView:view];
     }
     [stack setCustomSpacing:16.0 afterView:sections[5]];
+    // Help text sits close to its checkbox.
+    [stack setCustomSpacing:2.0 afterView:self.lockScreenCheckbox];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [content addSubview:stack];
     [stack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor].active = YES;
@@ -1481,6 +1498,12 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
     [self queue:AuralisActionSetLaunchAtLogin value:self.loginCheckbox.state == NSControlStateValueOn ? 1 : 0];
 }
 
+- (void)setMatchLockScreen:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionSetMatchLockScreen
+          value:self.lockScreenCheckbox.state == NSControlStateValueOn ? 1 : 0];
+}
+
 - (void)setReduceMotion:(id)sender {
     (void)sender;
     [self queue:AuralisActionSetReduceMotion value:self.motionCheckbox.state == NSControlStateValueOn ? 1 : 0];
@@ -1587,6 +1610,7 @@ void auralis_macos_studio_update(const AuralisStudioState *state) {
         AuralisSetCheckbox(studio.batteryCheckbox, state->pauseOnBattery);
         AuralisSetCheckbox(studio.loginCheckbox, state->launchAtLogin);
         AuralisSetCheckbox(studio.motionCheckbox, state->reduceMotion);
+        AuralisSetCheckbox(studio.lockScreenCheckbox, state->matchLockScreen);
     }
 }
 
@@ -1650,6 +1674,181 @@ int32_t auralis_macos_studio_preview_error(char *message, size_t capacity) {
         if (message != NULL && capacity > 0) {
             const char *text = error.localizedDescription.UTF8String ?: "AVFoundation could not play this video";
             snprintf(message, capacity, "%s", text);
+        }
+        return 1;
+    }
+}
+
+// MARK: - Lock screen still frame ("Match lock screen to wallpaper")
+
+static void AuralisWriteError(char *buffer, size_t capacity, NSString *message) {
+    if (buffer != NULL && capacity > 0) {
+        snprintf(buffer, capacity, "%s", (message ?: @"macOS reported no details").UTF8String ?: "");
+    }
+}
+
+static void AuralisClearError(char *buffer, size_t capacity) {
+    if (buffer != NULL && capacity > 0) {
+        buffer[0] = '\0';
+    }
+}
+
+// Reads the screen's desktop picture URL and options so Rust can restore them exactly.
+// `scaling`/`allowClipping` receive -1 when macOS did not set them; `hasColor` reports whether
+// `rgba` (sRGB components scaled to 0...65535) holds a fill color.
+int32_t auralis_macos_desktop_picture_get(uint32_t displayID,
+                                          char *url,
+                                          size_t urlCapacity,
+                                          int32_t *scaling,
+                                          int32_t *allowClipping,
+                                          uint16_t *rgba,
+                                          uint8_t *hasColor,
+                                          char *error,
+                                          size_t errorCapacity) {
+    @autoreleasepool {
+        AuralisClearError(error, errorCapacity);
+        if (url != NULL && urlCapacity > 0) {
+            url[0] = '\0';
+        }
+        *scaling = -1;
+        *allowClipping = -1;
+        *hasColor = 0;
+        NSScreen *screen = AuralisScreen(displayID);
+        if (screen == nil) {
+            AuralisWriteError(error, errorCapacity, @"The display is no longer connected");
+            return 0;
+        }
+        NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
+        NSURL *current = [workspace desktopImageURLForScreen:screen];
+        if (current == nil) {
+            AuralisWriteError(error, errorCapacity, @"macOS did not report the current desktop picture");
+            return 0;
+        }
+        NSString *absolute = current.absoluteString;
+        if (url == NULL || ![absolute getCString:url maxLength:urlCapacity encoding:NSUTF8StringEncoding]) {
+            AuralisWriteError(error, errorCapacity, @"The desktop picture path is too long");
+            return 0;
+        }
+        NSDictionary<NSWorkspaceDesktopImageOptionKey, id> *options = [workspace desktopImageOptionsForScreen:screen];
+        NSNumber *scalingValue = options[NSWorkspaceDesktopImageScalingKey];
+        if (scalingValue != nil) {
+            *scaling = scalingValue.intValue;
+        }
+        NSNumber *clippingValue = options[NSWorkspaceDesktopImageAllowClippingKey];
+        if (clippingValue != nil) {
+            *allowClipping = clippingValue.boolValue ? 1 : 0;
+        }
+        NSColor *fill = [options[NSWorkspaceDesktopImageFillColorKey] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+        if (fill != nil && rgba != NULL) {
+            CGFloat components[4] = {fill.redComponent, fill.greenComponent, fill.blueComponent, fill.alphaComponent};
+            for (int index = 0; index < 4; index++) {
+                CGFloat value = components[index] < 0.0 ? 0.0 : (components[index] > 1.0 ? 1.0 : components[index]);
+                rgba[index] = (uint16_t)lround(value * 65535.0);
+            }
+            *hasColor = 1;
+        }
+        return 1;
+    }
+}
+
+// Sets the screen's desktop picture. `url` is a file URL string (an original picture) or a plain
+// path (an Auralis still). `scaling`/`allowClipping` of -1 and a NULL `rgba` leave that option out.
+int32_t auralis_macos_desktop_picture_set(uint32_t displayID,
+                                          const char *url,
+                                          int32_t scaling,
+                                          int32_t allowClipping,
+                                          const uint16_t *rgba,
+                                          char *error,
+                                          size_t errorCapacity) {
+    @autoreleasepool {
+        AuralisClearError(error, errorCapacity);
+        NSScreen *screen = AuralisScreen(displayID);
+        if (screen == nil) {
+            AuralisWriteError(error, errorCapacity, @"The display is no longer connected");
+            return 0;
+        }
+        NSString *text = AuralisString(url);
+        NSURL *imageURL = [text hasPrefix:@"file:"] ? [NSURL URLWithString:text] : [NSURL fileURLWithPath:text];
+        if (imageURL == nil) {
+            AuralisWriteError(error, errorCapacity, @"The picture location is not valid");
+            return 0;
+        }
+        NSMutableDictionary<NSWorkspaceDesktopImageOptionKey, id> *options = [NSMutableDictionary dictionary];
+        if (scaling >= 0) {
+            options[NSWorkspaceDesktopImageScalingKey] = @(scaling);
+        }
+        if (allowClipping >= 0) {
+            options[NSWorkspaceDesktopImageAllowClippingKey] = @(allowClipping != 0);
+        }
+        if (rgba != NULL) {
+            options[NSWorkspaceDesktopImageFillColorKey] = [NSColor colorWithSRGBRed:rgba[0] / 65535.0
+                                                                               green:rgba[1] / 65535.0
+                                                                                blue:rgba[2] / 65535.0
+                                                                               alpha:rgba[3] / 65535.0];
+        }
+        NSError *failure = nil;
+        if (![[NSWorkspace sharedWorkspace] setDesktopImageURL:imageURL
+                                                     forScreen:screen
+                                                       options:options
+                                                         error:&failure]) {
+            AuralisWriteError(error, errorCapacity, failure.localizedDescription);
+            return 0;
+        }
+        return 1;
+    }
+}
+
+// Writes a JPEG still of `videoPath` at about 10% of its duration (1 s for clips shorter than
+// 10 s), with the preferred track transform applied, at most the screen's pixel size.
+// Only `outputPath` (inside Auralis's own lock-screen folder) is written; the video is read only.
+int32_t auralis_macos_extract_still(uint32_t displayID,
+                                    const char *videoPath,
+                                    const char *outputPath,
+                                    char *error,
+                                    size_t errorCapacity) {
+    @autoreleasepool {
+        AuralisClearError(error, errorCapacity);
+        NSScreen *screen = AuralisScreen(displayID);
+        if (screen == nil || videoPath == NULL || outputPath == NULL) {
+            AuralisWriteError(error, errorCapacity, @"The display is no longer connected");
+            return 0;
+        }
+        NSURL *videoURL = [NSURL fileURLWithFileSystemRepresentation:videoPath isDirectory:NO relativeToURL:nil];
+        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:videoURL options:nil];
+        AVAssetImageGenerator *generator = [AVAssetImageGenerator assetImageGeneratorWithAsset:asset];
+        generator.appliesPreferredTrackTransform = YES;
+        CGFloat scale = screen.backingScaleFactor > 0.0 ? screen.backingScaleFactor : 1.0;
+        generator.maximumSize = CGSizeMake(screen.frame.size.width * scale, screen.frame.size.height * scale);
+        CMTime tolerance = CMTimeMakeWithSeconds(0.5, 600);
+        generator.requestedTimeToleranceBefore = tolerance;
+        generator.requestedTimeToleranceAfter = tolerance;
+
+        // The synchronous AVAsset/AVAssetImageGenerator calls are deprecated in favor of async
+        // loading on newer SDKs but remain available on the macOS 13 deployment target. This runs
+        // once per wallpaper change on a local file.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        CMTime duration = asset.duration;
+        double seconds = CMTIME_IS_NUMERIC(duration) ? CMTimeGetSeconds(duration) : 0.0;
+        double at = seconds >= 10.0 ? seconds * 0.1 : (seconds > 1.0 ? 1.0 : 0.0);
+        NSError *failure = nil;
+        CGImageRef image = [generator copyCGImageAtTime:CMTimeMakeWithSeconds(at, 600)
+                                             actualTime:NULL
+                                                  error:&failure];
+#pragma clang diagnostic pop
+        if (image == NULL) {
+            AuralisWriteError(error, errorCapacity, failure.localizedDescription ?: @"AVFoundation could not read a frame");
+            return 0;
+        }
+        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithCGImage:image];
+        CGImageRelease(image);
+        NSData *jpeg = [bitmap representationUsingType:NSBitmapImageFileTypeJPEG
+                                            properties:@{NSImageCompressionFactor : @0.9}];
+        NSString *output = [[NSFileManager defaultManager] stringWithFileSystemRepresentation:outputPath
+                                                                                       length:strlen(outputPath)];
+        if (jpeg == nil || ![jpeg writeToFile:output options:NSDataWritingAtomic error:&failure]) {
+            AuralisWriteError(error, errorCapacity, failure.localizedDescription ?: @"Could not save the still frame");
+            return 0;
         }
         return 1;
     }
