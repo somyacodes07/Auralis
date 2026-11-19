@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title description">
+  <title id="title">Auralis mark</title>
+  <desc id="description">A soft-cornered monochrome tile with an A-shaped soundwave.</desc>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="#181819"/>
+  <path d="M18 48 32 15l14 33M24 35h6l3-7 5 15 4-8h4" fill="none" stroke="#f2f2f3" stroke-linecap="round" stroke-linejoin="round" stroke-width="3.5"/>
+</svg>

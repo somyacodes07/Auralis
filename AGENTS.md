@@ -120,6 +120,8 @@ Native desktop behavior still needs real integration testing. CI compilation is 
 
 Do not introduce a release workflow that publishes installers automatically from arbitrary branches. Release publishing must be tag-driven and follow the release policy below.
 
+Approved exception (maintainer request, 2026-11-19): `build-release.yml` publishes every push to the default branch as a numbered GitHub **prerelease** tagged `v<Cargo version>+build.<run number>`. It runs only on the default branch, builds through the same gated `package.yml` as maintainer releases, never marks a build as latest or stable, and keeps the Cargo version unchanged (the build number is SemVer build metadata). Maintainer releases still use a plain `v<version>` tag and a reviewed draft.
+
 ## 7. Git push and post-push verification
 
 When the agent is authorized to push changes:
@@ -163,7 +165,7 @@ The agent may **recommend** a version bump when a release milestone is genuinely
 3. Check changelog/release notes and compatibility implications.
 4. Obtain maintainer approval unless the user has explicitly delegated release/version decisions for that specific release.
 
-Do not create tags, GitHub Releases, or publish artifacts unless explicitly requested or covered by an approved release task. Release automation must be tag-driven and must verify that the tag matches the package version.
+Do not create tags, GitHub Releases, or publish artifacts unless explicitly requested or covered by an approved release task. Release automation must be tag-driven and must verify that the tag matches the package version. The automated numbered prereleases from `build-release.yml` (Section 6) are the approved exception; their tags derive the version from `Cargo.toml` and add only `+build.<N>` metadata.
 
 ## 9. Changelog and release notes
 

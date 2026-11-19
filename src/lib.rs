@@ -10,6 +10,26 @@
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// CI build number baked in by the automated build workflow (`AURALIS_BUILD_NUMBER`).
+/// Local builds leave it unset.
+pub const BUILD_NUMBER: Option<&str> = option_env!("AURALIS_BUILD_NUMBER");
+
+/// Version shown to users: the Cargo version plus SemVer build metadata when CI supplied a
+/// numeric build number, for example `0.2.0-beta.1+build.42`.
+#[must_use]
+pub fn version_label() -> String {
+    format_version_label(VERSION, BUILD_NUMBER)
+}
+
+fn format_version_label(version: &str, build: Option<&str>) -> String {
+    match build.map(str::trim) {
+        Some(number) if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) => {
+            format!("{version}+build.{number}")
+        }
+        _ => version.to_string(),
+    }
+}
+
 pub mod config;
 pub mod engine;
 pub mod media;
@@ -54,9 +74,9 @@ impl PlatformCapabilities {
         #[cfg(target_os = "macos")]
         {
             Self {
-                wallpaper_layering: false,
+                wallpaper_layering: true,
                 hardware_decoding: false,
-                multi_display: false,
+                multi_display: true,
                 os_name: "macOS",
             }
         }
@@ -141,6 +161,17 @@ mod tests {
     }
 
     #[test]
+    fn version_label_appends_only_numeric_build_metadata() {
+        assert_eq!(format_version_label("0.2.0", None), "0.2.0");
+        assert_eq!(
+            format_version_label("0.2.0-beta.1", Some("42")),
+            "0.2.0-beta.1+build.42"
+        );
+        assert_eq!(format_version_label("0.2.0", Some("")), "0.2.0");
+        assert_eq!(format_version_label("0.2.0", Some("12a")), "0.2.0");
+    }
+
+    #[test]
     fn test_platform_capabilities_detection() {
         let caps = PlatformCapabilities::detect();
         #[cfg(target_os = "windows")]
@@ -151,8 +182,9 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             assert_eq!(caps.os_name, "macOS");
-            assert!(!caps.wallpaper_layering);
+            assert!(caps.wallpaper_layering);
             assert!(!caps.hardware_decoding);
+            assert!(caps.multi_display);
         }
     }
 
