@@ -2,6 +2,8 @@
 
 This list is generated from `cargo metadata --format-version 1` for the locked dependency graph in `Cargo.lock`. Dependency license expressions remain those published by each upstream project. Review this inventory when dependencies change.
 
+License compliance is also enforced automatically: `cargo deny check` (configured in [`deny.toml`](deny.toml), run in CI) allows only MIT, Apache-2.0, Unicode-3.0, and Unlicense, all compatible with distributing Auralis under MIT OR Apache-2.0. The table below covers every platform in the lock file; `cargo deny` checks only the shipped targets (Windows x64 and macOS), so it reports `windows_x86_64_msvc` but not the other `windows_*` target crates. The Windows installer and portable zip ship this file, `LICENSE-MIT`, and `LICENSE-APACHE` next to `auralis.exe`.
+
 | Crate | Version | Declared license |
 | --- | --- | --- |
 | itoa | 1.0.18 | MIT OR Apache-2.0 |

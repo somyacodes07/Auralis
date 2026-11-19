@@ -73,6 +73,15 @@ These scripts verify:
 
 Every merge to `main` is built on native Windows and macOS runners and published as a numbered **prerelease** on the [Releases page](https://github.com/somyacodes07/Auralis/releases), tagged like `v0.2.0-beta.1+build.42`. The build number is shown in the Studio title bar and in `auralis status`. These are unsigned test builds; see [docs/CI_CD_SETUP.md](docs/CI_CD_SETUP.md).
 
+### Install on Windows
+
+1. Download `auralis-<version>-windows-x86_64-setup.exe` from the release (Windows 10 or 11, x64). This is the recommended option.
+2. Run it. It installs for your account only, into `%LOCALAPPDATA%\Programs\Auralis`, and does not ask for administrator rights. You can add a desktop shortcut and choose **Start Auralis when I sign in**.
+3. The installer is not code-signed yet, so Microsoft Defender SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**.
+4. To remove it, open **Settings, Apps, Installed apps**, find **Auralis**, and choose **Uninstall** (or right-click Auralis in the Start menu and choose **Uninstall**). The uninstaller closes a running Auralis and removes the sign-in entry. It asks whether to also delete your settings and logs; the default keeps them. Your video files are never touched.
+
+Prefer not to install? Download `auralis-<version>-windows-x86_64.zip` instead, unzip it anywhere, and run `auralis.exe`. To remove the portable copy, quit Auralis, turn off **Launch at startup** if you enabled it, and delete the folder.
+
 ### Install on macOS
 
 1. Download `auralis-<version>-macos-universal.dmg` from the release (works on Apple Silicon and Intel Macs, macOS 13 or later).
@@ -81,7 +90,7 @@ Every merge to `main` is built on native Windows and macOS runners and published
 4. Auralis runs in the menu bar (no Dock icon). To remove it, quit it from the menu bar and move `Auralis.app` to the Trash.
 
 
-Pull requests to `main` run formatting and patch-hygiene checks plus native Windows and macOS Clippy, tests, and release builds. Releases are tag-driven via [`.github/workflows/release.yml`](.github/workflows/release.yml). The workflow checks SemVer, exact equality with `Cargo.toml`, and reachability from the default branch. It builds a Windows ZIP and a universal macOS DMG. The draft release remains unsigned and must be reviewed and manually published after native acceptance testing:
+Pull requests to `main` run formatting, patch-hygiene, and `cargo deny` supply-chain checks plus native Windows and macOS Clippy, tests, and release builds. Releases are tag-driven via [`.github/workflows/release.yml`](.github/workflows/release.yml). The workflow checks SemVer, exact equality with `Cargo.toml`, and reachability from the default branch. It builds a Windows installer, a portable Windows ZIP, and a universal macOS DMG. The draft release remains unsigned and must be reviewed and manually published after native acceptance testing:
 
 1. Push the committed source to the default branch, then push its matching annotated SemVer tag (e.g., `v0.2.0-beta.1`):
    ```powershell

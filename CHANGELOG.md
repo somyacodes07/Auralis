@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Added
+- Windows builds now include a per-user installer (`auralis-<version>-windows-x86_64-setup.exe`) that needs no administrator rights. It installs to `%LOCALAPPDATA%\Programs\Auralis`, adds a Start menu entry, an optional desktop shortcut, and an optional "Start Auralis when I sign in" entry that matches the in-app Launch at startup toggle, and registers an uninstaller in Settings, Apps. Installing, upgrading, and uninstalling close a running Auralis first. Uninstalling removes the sign-in entry and asks before deleting settings and logs (the default keeps them); a silent uninstall always keeps them. The portable `.zip` is still published.
+- CI now runs `cargo deny` (RustSec advisories, a license allow-list, duplicate-version warnings, and crates.io-only sources) on every pull request and push to `main`, and silently installs and uninstalls the Windows installer as a smoke test.
 - macOS builds now ship as one universal (Apple Silicon and Intel) `.dmg` with drag-to-Applications install, replacing the single-architecture `.app.zip` and CLI `.tar.gz`. The app is ad-hoc signed and requires macOS 13 or later.
 - Every merge to `main` is now built on Windows and macOS and published as a numbered GitHub prerelease tagged `v<version>+build.<N>`. The build number appears in the Studio title, tray tooltip, `auralis status`, and the macOS bundle version.
 - Added a matching monochrome Auralis wordmark and square mark, plus an app-owned Windows icon for the Studio and system tray.

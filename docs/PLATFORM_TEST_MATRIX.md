@@ -5,6 +5,7 @@ GitHub Actions compile and test the Rust and native bridge code on native Window
 | Platform | Automated CI | Manual acceptance still required |
 | --- | --- | --- |
 | Windows x64 | `fmt`, Clippy, tests, release build; interactive runner may exercise host lifecycle | Launch Auralis, select a real local video, confirm desktop icons and ordinary windows remain above the wallpaper, verify multi-display placement, tray restore/quit, pause/mute/loop, sleep/wake, and display reconnect. |
+| Windows installer | Inno Setup compile; silent per-user install, `auralis.exe status`, and silent uninstall smoke test (files, Start menu shortcut, Run value removed; settings kept) | Run the setup wizard as a standard user (no UAC prompt), confirm SmartScreen guidance, shortcut icon, "Start Auralis when I sign in" matches the in-app toggle, upgrade over a running Studio (wallpaper restored, files replaced), and an interactive uninstall answering both No and Yes to deleting settings and logs. |
 | macOS | `fmt`, Clippy, tests, release build; `build.rs` compiles and links the AppKit/AVFoundation bridge | Launch the `.app`, choose a local video, verify the image sits behind desktop icons and normal windows across Spaces, confirm multi-display placement and removal, test recent cycling, audio, pause, sleep/wake, resolution change, Launch at Login toggle, and quit. |
 
 Record OS version, device model, display layout, video codec/profile/resolution/frame rate, and any known failures with the test result. Do not infer desktop behavior from compilation alone.
