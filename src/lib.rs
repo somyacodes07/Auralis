@@ -31,6 +31,7 @@ fn format_version_label(version: &str, build: Option<&str>) -> String {
 }
 
 pub mod config;
+pub mod diagnostics;
 pub mod engine;
 pub mod media;
 pub mod platform;

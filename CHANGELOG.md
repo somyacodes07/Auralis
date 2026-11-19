@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Added
+- The desktop app and `auralis play` now write a diagnostics log with startup, wallpaper apply/restore failures, playback errors, configuration recovery, and crash details (panic message and location). It lives in `%LOCALAPPDATA%\Auralis\logs` on Windows and `~/Library/Logs/Auralis` on macOS, rotates at 1 MB, and records media by file name only. `auralis status` shows its path.
+- `auralis.exe` now has the Auralis icon in Explorer and version details (product name, description, version, copyright) in its file properties. CI checks that release builds include them.
 - macOS builds now ship as one universal (Apple Silicon and Intel) `.dmg` with drag-to-Applications install, replacing the single-architecture `.app.zip` and CLI `.tar.gz`. The app is ad-hoc signed and requires macOS 13 or later.
 - Every merge to `main` is now built on Windows and macOS and published as a numbered GitHub prerelease tagged `v<version>+build.<N>`. The build number appears in the Studio title, tray tooltip, `auralis status`, and the macOS bundle version.
 - Added a matching monochrome Auralis wordmark and square mark, plus an app-owned Windows icon for the Studio and system tray.
