@@ -46,6 +46,8 @@ enum {
     AuralisActionSetReduceMotion = 26,
     AuralisActionNextRecent = 27,
     AuralisActionSetMatchLockScreen = 28,
+    AuralisActionCheckForUpdates = 29,
+    AuralisActionSetAutoUpdate = 30,
 };
 
 // Must match `NativeStudioState` in `src/platform/macos.rs`.
@@ -209,6 +211,8 @@ static void AuralisStartPromotionTimer(AuralisWallpaperHost *host) {
 @interface AuralisMenuController : NSObject
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, strong) NSMenuItem *launchAtLoginItem;
+@property(nonatomic, strong) NSMenuItem *checkForUpdatesItem;
+@property(nonatomic, strong) NSMenuItem *autoUpdateItem;
 @property(nonatomic, strong) NSMutableArray *notificationTokens;
 - (void)chooseWallpaper:(id)sender;
 - (void)togglePause:(id)sender;
@@ -380,6 +384,18 @@ static NSMenuItem *AuralisMenuItem(NSString *title, SEL action, id target) {
     AuralisQueueAction(AuralisActionOpenStudio, 0, nil);
 }
 
+- (void)checkForUpdates:(id)sender {
+    (void)sender;
+    AuralisQueueAction(AuralisActionCheckForUpdates, 0, nil);
+}
+
+- (void)toggleAutoUpdate:(id)sender {
+    (void)sender;
+    BOOL enable = self.autoUpdateItem.state != NSControlStateValueOn;
+    self.autoUpdateItem.state = enable ? NSControlStateValueOn : NSControlStateValueOff;
+    AuralisQueueAction(AuralisActionSetAutoUpdate, enable ? 1 : 0, nil);
+}
+
 - (void)quitAuralis:(id)sender {
     (void)sender;
     AuralisQueueAction(AuralisActionQuit, 0, nil);
@@ -431,7 +447,7 @@ static NSMenu *AuralisMainMenu(AuralisMenuController *controller) {
     return mainMenu;
 }
 
-void auralis_macos_begin_menu(uint8_t launchAtLogin) {
+void auralis_macos_begin_menu(uint8_t launchAtLogin, uint8_t autoUpdate) {
     @autoreleasepool {
         if (gAuralisMenu != nil) {
             return;
@@ -468,6 +484,12 @@ void auralis_macos_begin_menu(uint8_t launchAtLogin) {
         controller.launchAtLoginItem = AuralisMenuItem(@"Launch at Login", @selector(toggleLaunchAtLogin:), controller);
         controller.launchAtLoginItem.state = launchAtLogin ? NSControlStateValueOn : NSControlStateValueOff;
         [menu addItem:controller.launchAtLoginItem];
+        [menu addItem:[NSMenuItem separatorItem]];
+        controller.checkForUpdatesItem = AuralisMenuItem(@"Check for Updates…", @selector(checkForUpdates:), controller);
+        [menu addItem:controller.checkForUpdatesItem];
+        controller.autoUpdateItem = AuralisMenuItem(@"Update Automatically", @selector(toggleAutoUpdate:), controller);
+        controller.autoUpdateItem.state = autoUpdate ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:controller.autoUpdateItem];
         [menu addItem:[NSMenuItem separatorItem]];
         [menu addItem:AuralisMenuItem(@"Quit Auralis", @selector(quitAuralis:), controller)];
         controller.statusItem.menu = menu;
@@ -508,6 +530,17 @@ void auralis_macos_set_launch_menu_state(uint8_t enabled) {
     @autoreleasepool {
         if (gAuralisMenu.launchAtLoginItem != nil) {
             gAuralisMenu.launchAtLoginItem.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+    }
+}
+
+void auralis_macos_set_update_menu_state(uint8_t checking, uint8_t autoUpdate) {
+    @autoreleasepool {
+        if (gAuralisMenu.checkForUpdatesItem != nil) {
+            gAuralisMenu.checkForUpdatesItem.title = checking ? @"Checking for Updates…" : @"Check for Updates…";
+        }
+        if (gAuralisMenu.autoUpdateItem != nil) {
+            gAuralisMenu.autoUpdateItem.state = autoUpdate ? NSControlStateValueOn : NSControlStateValueOff;
         }
     }
 }

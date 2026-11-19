@@ -36,6 +36,7 @@ pub mod diagnostics;
 pub mod engine;
 pub mod media;
 pub mod platform;
+pub mod update;
 
 pub use config::{
     validate_media_file, AppConfig, ConfigError, DisplayWallpaperConfig, VideoAspectMode,

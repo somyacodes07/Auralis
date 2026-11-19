@@ -56,6 +56,7 @@ fn main() -> ExitCode {
         }
         "verify-desktop" => run_verify_desktop(),
         "quit" => run_quit(),
+        "update" => run_update(args.iter().skip(1).any(|a| a == "--check")),
         "--help" | "-h" | "help" => {
             print_help();
             ExitCode::SUCCESS
@@ -92,6 +93,77 @@ fn print_help() {
     println!(
         "  auralis quit                         Quit the running app and restore the desktop (Windows)"
     );
+    println!(
+        "  auralis update [--check]             Install the newest build from GitHub (--check only reports it)"
+    );
+}
+
+/// Check GitHub for a newer build and, unless `check_only`, download, verify and install it.
+fn run_update(check_only: bool) -> ExitCode {
+    use auralis::update::{self, InstallKind, Relaunch};
+    println!(
+        "Auralis {} ({}). Checking GitHub for a newer build...",
+        update::ReleaseVersion::current().label(),
+        match InstallKind::detect() {
+            InstallKind::WindowsInstaller => "installed",
+            InstallKind::WindowsPortable => "portable",
+            InstallKind::MacApp => "app bundle",
+            InstallKind::Unmanaged => "development build",
+        }
+    );
+    let offer = match update::check_for_update() {
+        Ok(Some(offer)) => offer,
+        Ok(None) => {
+            if InstallKind::detect().asset_suffix().is_none() {
+                println!("This build does not update from GitHub releases.");
+            } else {
+                println!("You have the newest build.");
+            }
+            return ExitCode::SUCCESS;
+        }
+        Err(error) => {
+            eprintln!("[ERROR] {error}.");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "Auralis {} is available ({:.1} MB): {}",
+        offer.version.label(),
+        offer.size as f64 / 1_048_576.0,
+        offer.release_url
+    );
+    if check_only {
+        return ExitCode::SUCCESS;
+    }
+    if !offer.kind.can_self_install() {
+        eprintln!("[ERROR] {}.", update::UpdateError::NotSupported);
+        return ExitCode::FAILURE;
+    }
+    println!("Downloading {}...", offer.file_name);
+    let file = match update::download(&offer) {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("[ERROR] {error}.");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("Checksum verified. Installing...");
+    match update::install(&offer, &file, Relaunch::No) {
+        Ok(()) if offer.kind == InstallKind::WindowsInstaller => {
+            println!("The installer is running and closes Auralis while it upgrades it. Open Auralis again when it finishes.");
+            ExitCode::SUCCESS
+        }
+        Ok(()) => {
+            println!(
+                "Updated. Quit Auralis from the menu bar and open it again to use the new version."
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[ERROR] {error}.");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Ask a running Studio to quit and restore the desktop; used by installers and uninstallers.

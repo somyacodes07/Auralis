@@ -18,6 +18,7 @@ use crate::config::{AppConfig, DisplayWallpaperConfig, VideoAspectMode};
 use crate::engine::WallpaperEngine;
 use crate::media::PlaybackState;
 use crate::platform::{create_platform_adapter, PowerStatus};
+use crate::update::{self, CheckOrigin, Relaunch, UpdateAgent, UpdateEvent};
 use crate::PlatformEvent;
 use std::cell::{Cell, RefCell};
 use std::mem;
@@ -53,8 +54,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, RemoveWindowSubclass,
-    SetWindowSubclass, Shell_NotifyIconW, HDROP, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
-    NIM_DELETE, NOTIFYICONDATAW, SUBCLASSPROC,
+    SetWindowSubclass, Shell_NotifyIconW, HDROP, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
+    NIIF_INFO, NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, SUBCLASSPROC,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
@@ -67,16 +68,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_OWNERDRAW, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST, CBS_HASSTRINGS,
     CBS_OWNERDRAWFIXED, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
     CB_SETITEMHEIGHT, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, IDC_ARROW,
-    IDI_APPLICATION, IDOK, MF_SEPARATOR, MF_STRING, MSG, PBT_APMPOWERSTATUSCHANGE,
-    PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, SPI_GETCLIENTAREAANIMATION,
-    SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_RETURNCMD, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DRAWITEM, WM_DROPFILES, WM_ENDSESSION, WM_ERASEBKGND,
-    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MEASUREITEM, WM_NCDESTROY, WM_PAINT, WM_POWERBROADCAST,
-    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_TRANSPARENT,
-    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    IDI_APPLICATION, IDOK, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
+    PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
+    SPI_GETCLIENTAREAANIMATION, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_RESTORE,
+    SW_SHOW, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, WA_INACTIVE, WM_ACTIVATE, WM_APP,
+    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DRAWITEM, WM_DROPFILES,
+    WM_ENDSESSION, WM_ERASEBKGND, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MEASUREITEM, WM_NCDESTROY,
+    WM_PAINT, WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETFONT, WM_TIMER, WNDCLASSW,
+    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT,
+    WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 pub const WINDOW_CLASS_NAME: &str = "AuralisConfigStudioWindowClass";
@@ -130,6 +131,8 @@ const IDM_TRAY_MUTE_UNMUTE: usize = 2003;
 const IDM_TRAY_STOP: usize = 2004;
 const IDM_TRAY_QUIT: usize = 2005;
 const IDM_TRAY_NEXT_RECENT: usize = 2006;
+const IDM_TRAY_CHECK_UPDATES: usize = 2007;
+const IDM_TRAY_AUTO_UPDATE: usize = 2008;
 
 const ID_TIMER_TICK: usize = 1;
 /// 100ms tick interval ensures pre-EOS seamless loop seeking and responsive policy updates.
@@ -202,6 +205,8 @@ struct GuiState {
     brand_icon: windows_sys::Win32::UI::WindowsAndMessaging::HICON,
     brand_icon_large: windows_sys::Win32::UI::WindowsAndMessaging::HICON,
     tick_counter: u32,
+    /// Background update checks and downloads from GitHub Releases.
+    updater: UpdateAgent,
 }
 
 thread_local! {
@@ -736,6 +741,7 @@ pub fn run_windows_gui(
                 brand_icon: std::ptr::null_mut(),
                 brand_icon_large: std::ptr::null_mut(),
                 tick_counter: 0,
+                updater: UpdateAgent::new(),
             });
         }
     });
@@ -1915,6 +1921,22 @@ fn show_tray_context_menu(hwnd: HWND) {
     let lbl_mute = wide_string("Mute / Unmute Audio");
     let lbl_stop = wide_string("Stop Wallpaper");
     let lbl_quit = wide_string("Quit Auralis && Restore Desktop");
+    let (update_busy, auto_update) = GUI_STATE.with(|cell| {
+        cell.try_borrow()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .map(|s| (s.updater.is_busy(), s.engine.config.auto_update))
+            })
+            .unwrap_or((false, false))
+    });
+    let lbl_check = wide_string(if update_busy {
+        "Checking for Updates…"
+    } else {
+        "Check for Updates"
+    });
+    let lbl_auto = wide_string("Update Automatically");
 
     // SAFETY: AppendMenuW populates the valid popup menu with command items and separators.
     unsafe {
@@ -1924,6 +1946,27 @@ fn show_tray_context_menu(hwnd: HWND) {
         AppendMenuW(hmenu, MF_STRING, IDM_TRAY_NEXT_RECENT, lbl_next.as_ptr());
         AppendMenuW(hmenu, MF_STRING, IDM_TRAY_MUTE_UNMUTE, lbl_mute.as_ptr());
         AppendMenuW(hmenu, MF_STRING, IDM_TRAY_STOP, lbl_stop.as_ptr());
+        AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
+        AppendMenuW(
+            hmenu,
+            if update_busy {
+                MF_STRING | MF_GRAYED
+            } else {
+                MF_STRING
+            },
+            IDM_TRAY_CHECK_UPDATES,
+            lbl_check.as_ptr(),
+        );
+        AppendMenuW(
+            hmenu,
+            if auto_update {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            },
+            IDM_TRAY_AUTO_UPDATE,
+            lbl_auto.as_ptr(),
+        );
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(hmenu, MF_STRING, IDM_TRAY_QUIT, lbl_quit.as_ptr());
     }
@@ -1996,7 +2039,141 @@ fn show_tray_context_menu(hwnd: HWND) {
         IDM_TRAY_QUIT => {
             handle_command(hwnd, ID_BTN_QUIT, 0);
         }
+        IDM_TRAY_CHECK_UPDATES => {
+            GUI_STATE.with(|cell| {
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        state.updater.start(CheckOrigin::Manual);
+                    }
+                }
+            });
+        }
+        IDM_TRAY_AUTO_UPDATE => {
+            GUI_STATE.with(|cell| {
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    if let Some(state) = guard.as_mut() {
+                        state.engine.config.auto_update = !state.engine.config.auto_update;
+                        let _ = state.engine.config.save_to_file(&state.config_path);
+                    }
+                }
+            });
+        }
         _ => {}
+    }
+}
+
+/// Show a tray notification balloon (a toast on Windows 10 and 11).
+fn show_tray_notification(hwnd: HWND, title: &str, text: &str, warning: bool) {
+    // SAFETY: NOTIFYICONDATAW is a plain C struct safe to zero-initialize.
+    let mut nid: NOTIFYICONDATAW = unsafe { mem::zeroed() };
+    nid.cbSize = mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = TRAY_ICON_ID;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = if warning { NIIF_WARNING } else { NIIF_INFO };
+    let title = wide_string(title);
+    let text = wide_string(text);
+    let title_len = title.len().min(nid.szInfoTitle.len() - 1);
+    nid.szInfoTitle[..title_len].copy_from_slice(&title[..title_len]);
+    let text_len = text.len().min(nid.szInfo.len() - 1);
+    nid.szInfo[..text_len].copy_from_slice(&text[..text_len]);
+    // SAFETY: NIM_MODIFY updates the tray icon this window registered with a notification.
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+/// Start the daily automatic check when due and act on a finished check.
+fn tick_updates(hwnd: HWND) {
+    let finished = GUI_STATE.with(|cell| {
+        let mut guard = cell.try_borrow_mut().ok()?;
+        let state = guard.as_mut()?;
+        let enabled = state.engine.config.auto_update && update::automatic_updates_supported();
+        state
+            .updater
+            .tick(enabled, state.engine.config.last_update_check);
+        let finished = state.updater.poll()?;
+        if finished.0 == CheckOrigin::Automatic {
+            state.engine.config.last_update_check =
+                Some(update::unix_seconds(std::time::SystemTime::now()));
+            let _ = state.engine.config.save_to_file(&state.config_path);
+        }
+        Some(finished)
+    });
+    let Some((origin, event)) = finished else {
+        return;
+    };
+    let manual = origin == CheckOrigin::Manual;
+    match event {
+        UpdateEvent::UpToDate => {
+            if manual {
+                show_tray_notification(
+                    hwnd,
+                    "Auralis is up to date",
+                    &format!("You have {}.", update::ReleaseVersion::current().label()),
+                    false,
+                );
+            }
+        }
+        UpdateEvent::Available(offer) => {
+            crate::diagnostics::info(&format!(
+                "Update {} is available (portable copy, not installed automatically)",
+                offer.version.label()
+            ));
+            show_tray_notification(
+                hwnd,
+                &format!("Auralis {} is available", offer.version.label()),
+                "This portable copy can't update itself. Download the new zip from the Auralis website.",
+                false,
+            );
+        }
+        UpdateEvent::Ready(offer, file) => {
+            // SAFETY: IsWindowVisible only reads this window's visibility.
+            let studio_visible =
+                unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd) != 0 };
+            let relaunch = if manual || studio_visible {
+                Relaunch::Studio
+            } else {
+                Relaunch::Minimized
+            };
+            match update::install(&offer, &file, relaunch) {
+                Ok(()) => {
+                    crate::diagnostics::info(&format!(
+                        "Installing update {}",
+                        offer.version.label()
+                    ));
+                    show_tray_notification(
+                        hwnd,
+                        &format!("Updating Auralis to {}", offer.version.label()),
+                        "Your wallpaper comes back in a few seconds.",
+                        false,
+                    );
+                    // The installer waits for this process; quit the normal way so the desktop
+                    // is restored and settings are saved first.
+                    handle_command(hwnd, ID_BTN_QUIT, 0);
+                }
+                Err(error) => {
+                    crate::diagnostics::error(&format!("Update install failed: {error}"));
+                    show_tray_notification(
+                        hwnd,
+                        "Auralis couldn't update",
+                        &format!("{error}."),
+                        true,
+                    );
+                }
+            }
+        }
+        UpdateEvent::Failed(error) => {
+            crate::diagnostics::warn(&format!("Update check failed: {error}"));
+            if manual {
+                show_tray_notification(
+                    hwnd,
+                    "Couldn't check for updates",
+                    &format!("{error}. Try again later."),
+                    true,
+                );
+            }
+        }
     }
 }
 
@@ -2271,6 +2448,7 @@ unsafe extern "system" fn window_proc(
                 if check_hosts {
                     recover_wallpaper_hosts();
                 }
+                tick_updates(hwnd);
                 let (ticked, animate_live, refresh_status) = GUI_STATE.with(|cell| {
                     if let Ok(mut guard) = cell.try_borrow_mut() {
                         if let Some(state) = guard.as_mut() {

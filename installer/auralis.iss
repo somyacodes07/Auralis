@@ -140,6 +140,9 @@ Name: "{autodesktop}\Auralis"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}";
 
 [Run]
 Filename: "{app}\{#AppExe}"; Parameters: "gui"; WorkingDir: "{app}"; Description: "Launch Auralis"; Flags: nowait postinstall skipifsilent
+; In-app updates run this installer silently with /relaunch=minimized or /relaunch=studio
+; (src/update.rs) so Auralis starts again once the upgrade is done.
+Filename: "{app}\{#AppExe}"; Parameters: "{code:RelaunchArguments}"; WorkingDir: "{app}"; Flags: nowait; Check: ShouldRelaunch
 
 [Code]
 const
@@ -215,6 +218,22 @@ begin
   end;
 end;
 
+// True for a silent install started by the in-app updater, which asks to be started again.
+function ShouldRelaunch: Boolean;
+var
+  Mode: String;
+begin
+  Mode := ExpandConstant('{param:relaunch|}');
+  Result := WizardSilent and ((Mode = 'minimized') or (Mode = 'studio'));
+end;
+
+function RelaunchArguments(Param: String): String;
+begin
+  if ExpandConstant('{param:relaunch|}') = 'minimized' then
+    Result := 'gui --minimized'
+  else
+    Result := 'gui';
+end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   StopAuralis(ExpandConstant('{app}\{#AppExe}'));

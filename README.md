@@ -18,6 +18,7 @@ A Rust-first live wallpaper application for **Windows** and **macOS**, built aro
 - **Windows System Tray & Login Startup Integration**: Minimizes to the Windows System Tray (`Shell_NotifyIconW`) with the custom A/wave icon and quick-control menu (`Open`, `Next Recent Wallpaper`, `Pause / Resume`, `Mute / Unmute`, `Stop`, `Quit`) and optional login startup registration.
 - **macOS Menu Bar and Studio**: Runs as a menu-bar app with a matching monochrome mark. **Open Auralis Studio…** (Cmd-,) opens a native AppKit window with display selection, a video path field with Browse, drag and drop and Next recent, an on-demand preview, Set as wallpaper, pause/resume, stop, mute, loop, volume, speed, Fill/Fit scaling, the behavior settings, and live status. The Studio opens automatically when no wallpaper is running; closing it keeps the wallpaper playing. An opt-in **Match lock screen to wallpaper** setting sets a still frame of the video as the desktop picture so the lock screen matches (macOS does not allow video there), and restores the original picture when turned off, stopped, or on Quit. The menu also offers the file picker, recent cycling, pause/resume, mute, stop, and Launch at Login, and Auralis handles display changes and sleep/wake.
 - **Resilient Runtime**: Closing or minimizing the configuration window keeps your live wallpaper playing in the background. Failed media replacements automatically preserve your previous working wallpaper, and corrupt config files are safely backed up to `.corrupt.bak`.
+- **Automatic Updates**: Once a day Auralis asks GitHub Releases for a newer build, downloads it, checks it against the published SHA-256 checksum, installs it, and starts again with your wallpaper. On Windows the installed copy runs the new installer silently; on macOS the app in Applications replaces itself. **Check for Updates** and **Update Automatically** are in the tray and menu-bar menus. The portable zip and development builds only report new versions. Builds are not code-signed yet, so the checksum proves the file is the one published on GitHub, not who built it.
 - **Smart Power, Sleep/Wake & Full-Screen Policies**: Automatically pauses video playback when a full-screen application/game occludes the monitor, when the system enters sleep (`WM_POWERBROADCAST`), or when running on battery power.
 
 ## Platform support
@@ -25,7 +26,7 @@ A Rust-first live wallpaper application for **Windows** and **macOS**, built aro
 | Platform | Current support |
 | --- | --- |
 | Windows x64 | Native Studio UI, desktop wallpaper layering, hardware video playback, tray controls, and startup integration are implemented. CI builds and tests on Windows; desktop layering and playback still need manual acceptance testing on each supported Windows configuration. |
-| macOS | Native menu-bar app and Studio window, AVFoundation video playback, multi-display host creation, LaunchAgent control, full-screen and battery pause, and sleep/wake/display-change handling are implemented. CI compiles and tests the native bridge. The first real-Mac report found the wallpaper was not visible; a fix is in place but has not been retested on a Mac yet, and the Studio window is untested on a real Mac. |
+| macOS | Native menu-bar app and Studio window, AVFoundation video playback, multi-display host creation, LaunchAgent control, full-screen and battery pause, sleep/wake/display-change handling, and in-place updates are implemented. CI compiles and tests the native bridge. The maintainer has confirmed the wallpaper and Studio working on an Apple Silicon Mac; other Macs and multi-display layouts still need testing (see the test matrix). |
 
 For engineering and contribution guidance, see [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [docs/PLATFORM_TEST_MATRIX.md](docs/PLATFORM_TEST_MATRIX.md). Brand rules, the mark geometry, and how the icons and installer art are generated are in [docs/BRAND.md](docs/BRAND.md); design and resource measurement notes are in [docs/UX_AND_PERFORMANCE.md](docs/UX_AND_PERFORMANCE.md).
 
@@ -54,6 +55,9 @@ cargo run --release
 
 # Quit a running Studio and restore the desktop (exits 0 if none is running; used by installers)
 .\target\release\auralis.exe quit
+
+# Install the newest build from GitHub (--check only reports whether one exists)
+.\target\release\auralis.exe update [--check]
 ```
 
 ## Quality Gates & Local Verification

@@ -6,6 +6,7 @@ GitHub Actions compile and test the Rust and native bridge code on native Window
 | --- | --- | --- |
 | Windows x64 | `fmt`, Clippy, tests, release build; interactive runner may exercise host lifecycle | Launch Auralis, select a real local video, confirm desktop icons and ordinary windows remain above the wallpaper, verify multi-display placement, tray restore/quit, pause/mute/loop, sleep/wake, and display reconnect. Restart Explorer (`taskkill /f /im explorer.exe` then `start explorer.exe`) and confirm the wallpaper and tray icon return; check Tab/Shift+Tab/Space/Enter in the Studio; move the Studio to a monitor with a different scale factor; run `auralis quit`. |
 | Windows installer | Inno Setup compile; silent per-user install, `auralis.exe status`, and silent uninstall smoke test (files, Start menu shortcut, Run value removed; settings kept) | Run the setup wizard as a standard user (no UAC prompt), confirm SmartScreen guidance, shortcut icon, "Start Auralis when I sign in" matches the in-app toggle, upgrade over a running Studio (wallpaper restored, files replaced), and an interactive uninstall answering both No and Yes to deleting settings and logs. |
+| Updates | Unit tests for version ordering, release selection, checksum parsing and SHA-256; `cargo test -- --ignored` downloads a published build and verifies its checksum | See "Update manual checklist" below: needs two consecutive numbered builds, the older one installed. |
 | macOS | `fmt`, Clippy, tests, release build; `build.rs` compiles and links the AppKit/AVFoundation bridge | Launch the `.app`, choose a local video, verify the image sits behind desktop icons and normal windows across Spaces, confirm multi-display placement and removal, test recent cycling, audio, pause, sleep/wake, resolution change, Launch at Login toggle, and quit. |
 
 Record OS version, device model, display layout, video codec/profile/resolution/frame rate, and any known failures with the test result. Do not infer desktop behavior from compilation alone.
@@ -16,13 +17,14 @@ Record OS version, device model, display layout, video codec/profile/resolution/
 | --- | --- | --- | --- | --- |
 | 2026-11-19 | macOS 15 (Sequoia) or newer, Apple Silicon | `main` before the host-visibility fix (menu-bar app) | **FAIL** (since fixed) | User report: after selecting a video, the original desktop picture stayed unchanged. Cause: the AppKit host window was created but never ordered on screen, at the same level as the system desktop picture. Fixed in `feat/macos-studio` (commit a5a62f4). |
 | 2026-11-19 | macOS 15 or newer, Apple Silicon, built-in display 1710 × 1112 | PR #13 integration build (host-visibility fix and Studio) | **PASS** | User report: the wallpaper is visible and plays behind desktop icons. A black desktop seen in one run came from Pause on battery power (Low Power Mode on); later builds show the paused wallpaper's first frame and name the pause reason. |
+| 2026-11-19 | macOS, Apple Silicon | Numbered build from `main` (Studio, lock screen match) | **PASS** | Maintainer report: Auralis works as expected on the Mac. Individual checklist items below were not recorded separately. |
 
 ## Current status
 
 - Windows desktop layering and playback code are implemented. Per-release interactive acceptance remains required across supported Windows configurations.
 - macOS has a native menu-bar controller, AVFoundation player, AppKit host, and lifecycle hooks. After the host-visibility fix, the wallpaper was confirmed visible and playing on one Apple Silicon Mac (macOS 15+). Other Macs, multi-display layouts, and sleep/wake still need acceptance testing.
 - To diagnose a macOS host on a real Mac, run `/Applications/Auralis.app/Contents/MacOS/Auralis verify-desktop` in Terminal and include its `Host window:` line (window number, level, frame, visibility, active Space) in the test record.
-- macOS now has a Studio window (NOT VERIFIED on a real Mac). Full-screen detection uses the on-screen window list and may pause for any other app's window that covers the whole display, including borderless overlays.
+- macOS has a Studio window; the maintainer reported it working as expected on one Apple Silicon Mac (individual checklist items not recorded). Full-screen detection uses the on-screen window list and may pause for any other app's window that covers the whole display, including borderless overlays.
 
 ## macOS Studio manual checklist
 
@@ -42,3 +44,14 @@ Run on a real Mac with the `.app` from the DMG. Record macOS version, chip, and 
 12. Change the wallpaper or Fill/Fit: the still updates and the previous JPEG is deleted.
 13. Restore: turning the setting off, **Stop wallpaper**, and **Quit Auralis** each bring back the exact original desktop picture (including its scaling and fill color), and remove the JPEG. After a force-quit the still stays; relaunching with the setting off restores the original.
 14. Known limits to note: `setDesktopImageURL` changes the picture for the current Space only, and a dynamic or aerial wallpaper may come back as its static image.
+
+## Update manual checklist
+
+Automatic updates need a published build that is newer than the installed one. Use two numbered builds from `main` (`build-release.yml` can be run again with **Run workflow** to publish the next number).
+
+1. Windows: install the older `…-setup.exe`. In the tray menu choose **Check for Updates**. Within a minute a notification says "Updating Auralis to …", Auralis quits, the installer runs silently, and Auralis opens again on the new build (title bar and `auralis status` show the new number). The wallpaper comes back; settings and the sign-in entry are unchanged.
+2. Windows: with **Update Automatically** checked and the Studio hidden, restart Auralis with the older build and wait just over a minute: it updates and comes back minimized to the tray. Unchecking the item stops automatic checks.
+3. Windows portable zip: **Check for Updates** shows a notification that a new version is available and that the zip must be downloaded again; nothing is replaced.
+4. macOS: open the older `.dmg`, drag Auralis to Applications, open it, and choose **Check for Updates…** in the menu bar. Auralis quits and reopens on the new build within a few seconds; `/Applications/Auralis.app/Contents/Info.plist` shows the new build number and no `.Auralis-update.app` or `.Auralis-previous.app` remains in Applications.
+5. macOS: running from a read-only location (for example straight from the mounted disk image), **Check for Updates…** reports that Auralis must be moved to Applications and keeps running.
+6. Offline: **Check for Updates** reports that GitHub could not be reached; automatic checks fail silently and are written to the diagnostics log.
