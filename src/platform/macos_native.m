@@ -1,11 +1,84 @@
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <IOKit/ps/IOPSKeys.h>
+#import <IOKit/ps/IOPowerSources.h>
 #import <QuartzCore/QuartzCore.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#include <mach/mach.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <unistd.h>
+
+// Small AppKit bridge for Auralis. Objective-C here owns views and native players only.
+// Every user action is queued as {action code, integer value, UTF-8 text} and drained by Rust
+// (`auralis_macos_poll_action`); Rust decides what to do and pushes display state back through
+// the `auralis_macos_studio_*` functions. Action codes must match `src/platform/macos_studio.rs`.
+enum {
+    AuralisActionSetPrimaryWallpaper = 1,
+    AuralisActionTogglePauseAll = 2,
+    AuralisActionToggleMuteAll = 3,
+    AuralisActionNextRecentPrimary = 4,
+    AuralisActionStopAll = 5,
+    AuralisActionQuit = 6,
+    AuralisActionDisplaysChanged = 7,
+    AuralisActionSystemWillSleep = 8,
+    AuralisActionSystemDidWake = 9,
+    AuralisActionSetLaunchAtLogin = 10,
+    AuralisActionOpenStudio = 11,
+    AuralisActionStudioClosed = 12,
+    AuralisActionSelectDisplay = 13,
+    AuralisActionPreview = 14,
+    AuralisActionStopPreview = 15,
+    AuralisActionApply = 16,
+    AuralisActionTogglePause = 17,
+    AuralisActionStop = 18,
+    AuralisActionSetMuted = 19,
+    AuralisActionSetLoop = 20,
+    AuralisActionStepVolume = 21,
+    AuralisActionStepSpeed = 22,
+    AuralisActionSetAspect = 23,
+    AuralisActionSetPauseOnFullscreen = 24,
+    AuralisActionSetPauseOnBattery = 25,
+    AuralisActionSetReduceMotion = 26,
+    AuralisActionNextRecent = 27,
+};
+
+// Must match `NativeStudioState` in `src/platform/macos.rs`.
+typedef struct {
+    const char *status;
+    const char *details;
+    const char *resources;
+    const char *volumeLabel;
+    const char *speedLabel;
+    const char *pauseLabel;
+    uint8_t controlsEnabled;
+    uint8_t muted;
+    uint8_t loopPlayback;
+    uint8_t fitAspect;
+    uint8_t pauseOnFullscreen;
+    uint8_t pauseOnBattery;
+    uint8_t launchAtLogin;
+    uint8_t reduceMotion;
+    uint8_t previewActive;
+} AuralisStudioState;
+
+// Must match `NativeRect` in `src/platform/macos.rs`.
+typedef struct {
+    double x;
+    double y;
+    double width;
+    double height;
+} AuralisRect;
+
+static BOOL gAuralisReduceMotion = NO;
+
+static BOOL AuralisShouldReduceMotion(void) {
+    return gAuralisReduceMotion || [NSWorkspace sharedWorkspace].accessibilityDisplayShouldReduceMotion;
+}
 
 @interface AuralisWallpaperHost : NSObject
 {
@@ -35,11 +108,16 @@
 - (void)nextRecent:(id)sender;
 - (void)stopWallpaper:(id)sender;
 - (void)toggleLaunchAtLogin:(id)sender;
+- (void)openStudio:(id)sender;
 - (void)quitAuralis:(id)sender;
 @end
 
+@class AuralisStudioController;
+
 static NSMutableArray<NSDictionary<NSString *, id> *> *gAuralisActions;
 static AuralisMenuController *gAuralisMenu;
+static AuralisStudioController *gAuralisStudio;
+static void AuralisStudioClose(void);
 
 static AuralisWallpaperHost *AuralisHost(void *handle) {
     return handle == NULL ? nil : (__bridge AuralisWallpaperHost *)handle;
@@ -55,13 +133,40 @@ static NSScreen *AuralisScreen(CGDirectDisplayID displayID) {
     return nil;
 }
 
-static void AuralisQueueAction(int32_t action, NSString *path) {
+static void AuralisQueueAction(int32_t action, int32_t value, NSString *text) {
     @synchronized ([AuralisMenuController class]) {
         if (gAuralisActions == nil) {
             gAuralisActions = [NSMutableArray array];
         }
-        [gAuralisActions addObject:@{@"action" : @(action), @"path" : path ?: @""}];
+        [gAuralisActions addObject:@{@"action" : @(action), @"value" : @(value), @"text" : text ?: @""}];
     }
+}
+
+static NSString *AuralisString(const char *text) {
+    if (text == NULL) {
+        return @"";
+    }
+    return [NSString stringWithUTF8String:text] ?: @"";
+}
+
+static NSArray<NSString *> *AuralisVideoExtensions(void) {
+    // Must match `SUPPORTED_EXTENSIONS` in `src/config.rs`.
+    return @[@"mp4", @"mov", @"mkv", @"webm", @"m4v"];
+}
+
+static NSArray<UTType *> *AuralisVideoTypes(void) {
+    NSMutableArray<UTType *> *types = [NSMutableArray array];
+    for (NSString *extension in AuralisVideoExtensions()) {
+        UTType *type = [UTType typeWithFilenameExtension:extension];
+        if (type != nil && ![types containsObject:type]) {
+            [types addObject:type];
+        }
+    }
+    return types;
+}
+
+static BOOL AuralisIsVideoURL(NSURL *url) {
+    return url.isFileURL && [AuralisVideoExtensions() containsObject:url.pathExtension.lowercaseString];
 }
 
 static NSImage *AuralisMarkImage(void) {
@@ -101,45 +206,95 @@ static NSMenuItem *AuralisMenuItem(NSString *title, SEL action, id target) {
     panel.canChooseFiles = YES;
     panel.canChooseDirectories = NO;
     panel.allowsMultipleSelection = NO;
-    panel.allowedFileTypes = @[@"mp4", @"mov", @"mkv", @"webm", @"m4v"];
+    panel.allowedContentTypes = AuralisVideoTypes();
     panel.prompt = @"Set Wallpaper";
     if ([panel runModal] == NSModalResponseOK && panel.URL != nil) {
-        AuralisQueueAction(1, panel.URL.path);
+        AuralisQueueAction(AuralisActionSetPrimaryWallpaper, 0, panel.URL.path);
     }
 }
 
 - (void)togglePause:(id)sender {
     (void)sender;
-    AuralisQueueAction(2, nil);
+    AuralisQueueAction(AuralisActionTogglePauseAll, 0, nil);
 }
 
 - (void)toggleMute:(id)sender {
     (void)sender;
-    AuralisQueueAction(3, nil);
+    AuralisQueueAction(AuralisActionToggleMuteAll, 0, nil);
 }
 
 - (void)nextRecent:(id)sender {
     (void)sender;
-    AuralisQueueAction(4, nil);
+    AuralisQueueAction(AuralisActionNextRecentPrimary, 0, nil);
 }
 
 - (void)stopWallpaper:(id)sender {
     (void)sender;
-    AuralisQueueAction(5, nil);
+    AuralisQueueAction(AuralisActionStopAll, 0, nil);
 }
 
 - (void)toggleLaunchAtLogin:(id)sender {
     (void)sender;
     BOOL enable = self.launchAtLoginItem.state != NSControlStateValueOn;
     self.launchAtLoginItem.state = enable ? NSControlStateValueOn : NSControlStateValueOff;
-    AuralisQueueAction(10, enable ? @"1" : @"0");
+    AuralisQueueAction(AuralisActionSetLaunchAtLogin, enable ? 1 : 0, nil);
+}
+
+- (void)openStudio:(id)sender {
+    (void)sender;
+    AuralisQueueAction(AuralisActionOpenStudio, 0, nil);
 }
 
 - (void)quitAuralis:(id)sender {
     (void)sender;
-    AuralisQueueAction(6, nil);
+    AuralisQueueAction(AuralisActionQuit, 0, nil);
 }
 @end
+
+// Main menu: only reachable while the Studio is open (the app is otherwise an accessory), it
+// provides the standard key equivalents, including text editing in the path field.
+static NSMenu *AuralisMainMenu(AuralisMenuController *controller) {
+    NSMenu *mainMenu = [[NSMenu alloc] initWithTitle:@""];
+
+    NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Auralis" action:nil keyEquivalent:@""];
+    NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"Auralis"];
+    NSMenuItem *studio = [[NSMenuItem alloc] initWithTitle:@"Open Auralis Studio…"
+                                                    action:@selector(openStudio:)
+                                             keyEquivalent:@","];
+    studio.target = controller;
+    [appMenu addItem:studio];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItemWithTitle:@"Hide Auralis" action:@selector(hide:) keyEquivalent:@"h"];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Quit Auralis"
+                                                  action:@selector(quitAuralis:)
+                                           keyEquivalent:@"q"];
+    quit.target = controller;
+    [appMenu addItem:quit];
+    appItem.submenu = appMenu;
+    [mainMenu addItem:appItem];
+
+    NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"Edit" action:nil keyEquivalent:@""];
+    NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+    [editMenu addItemWithTitle:@"Undo" action:@selector(undo:) keyEquivalent:@"z"];
+    NSMenuItem *redo = [editMenu addItemWithTitle:@"Redo" action:@selector(redo:) keyEquivalent:@"z"];
+    redo.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
+    [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+    [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+    [editMenu addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+    editItem.submenu = editMenu;
+    [mainMenu addItem:editItem];
+
+    NSMenuItem *windowItem = [[NSMenuItem alloc] initWithTitle:@"Window" action:nil keyEquivalent:@""];
+    NSMenu *windowMenu = [[NSMenu alloc] initWithTitle:@"Window"];
+    [windowMenu addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+    [windowMenu addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
+    windowItem.submenu = windowMenu;
+    [mainMenu addItem:windowItem];
+    return mainMenu;
+}
 
 void auralis_macos_begin_menu(uint8_t launchAtLogin) {
     @autoreleasepool {
@@ -149,6 +304,9 @@ void auralis_macos_begin_menu(uint8_t launchAtLogin) {
 
         NSApplication *application = [NSApplication sharedApplication];
         [application setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        // Rust pumps events manually instead of calling -run, so finish launching explicitly
+        // (windows can then become key and the main menu's key equivalents work).
+        [application finishLaunching];
         @synchronized ([AuralisMenuController class]) {
             gAuralisActions = [NSMutableArray array];
         }
@@ -157,8 +315,14 @@ void auralis_macos_begin_menu(uint8_t launchAtLogin) {
         controller.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
         controller.statusItem.button.image = AuralisMarkImage();
         controller.statusItem.button.toolTip = @"Auralis live wallpaper";
+        application.mainMenu = AuralisMainMenu(controller);
 
         NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Auralis"];
+        NSMenuItem *studioItem = AuralisMenuItem(@"Open Auralis Studio…", @selector(openStudio:), controller);
+        studioItem.keyEquivalent = @",";
+        studioItem.keyEquivalentModifierMask = NSEventModifierFlagCommand;
+        [menu addItem:studioItem];
+        [menu addItem:[NSMenuItem separatorItem]];
         [menu addItem:AuralisMenuItem(@"Set Primary Wallpaper…", @selector(chooseWallpaper:), controller)];
         [menu addItem:AuralisMenuItem(@"Next Recent Wallpaper", @selector(nextRecent:), controller)];
         [menu addItem:[NSMenuItem separatorItem]];
@@ -181,7 +345,7 @@ void auralis_macos_begin_menu(uint8_t launchAtLogin) {
                          queue:nil
                     usingBlock:^(NSNotification *notification) {
                         (void)notification;
-                        AuralisQueueAction(7, nil);
+                        AuralisQueueAction(AuralisActionDisplaysChanged, 0, nil);
                     }];
         [controller.notificationTokens addObject:displayToken];
 
@@ -191,14 +355,14 @@ void auralis_macos_begin_menu(uint8_t launchAtLogin) {
                                                      queue:nil
                                                 usingBlock:^(NSNotification *notification) {
                                                     (void)notification;
-                                                    AuralisQueueAction(8, nil);
+                                                    AuralisQueueAction(AuralisActionSystemWillSleep, 0, nil);
                                                 }];
         id wakeToken = [workspaceCenter addObserverForName:NSWorkspaceDidWakeNotification
                                                    object:nil
                                                     queue:nil
                                                usingBlock:^(NSNotification *notification) {
                                                    (void)notification;
-                                                   AuralisQueueAction(9, nil);
+                                                   AuralisQueueAction(AuralisActionSystemDidWake, 0, nil);
                                                }];
         [controller.notificationTokens addObject:sleepToken];
         [controller.notificationTokens addObject:wakeToken];
@@ -215,6 +379,7 @@ void auralis_macos_set_launch_menu_state(uint8_t enabled) {
 
 void auralis_macos_end_menu(void) {
     @autoreleasepool {
+        AuralisStudioClose();
         if (gAuralisMenu == nil) {
             return;
         }
@@ -250,7 +415,7 @@ void auralis_macos_pump_events(void) {
     }
 }
 
-int32_t auralis_macos_poll_action(char *path, size_t pathCapacity) {
+int32_t auralis_macos_poll_action(char *text, size_t textCapacity, int32_t *value) {
     @autoreleasepool {
         NSDictionary<NSString *, id> *event = nil;
         @synchronized ([AuralisMenuController class]) {
@@ -260,12 +425,17 @@ int32_t auralis_macos_poll_action(char *path, size_t pathCapacity) {
             event = gAuralisActions.firstObject;
             [gAuralisActions removeObjectAtIndex:0];
         }
-        NSString *value = event[@"path"];
-        if (path != NULL && pathCapacity > 0) {
-            memset(path, 0, pathCapacity);
-            if (value.length > 0) {
-                (void)[value getCString:path maxLength:pathCapacity encoding:NSUTF8StringEncoding];
+        NSString *payload = event[@"text"];
+        if (text != NULL && textCapacity > 0) {
+            memset(text, 0, textCapacity);
+            if (payload.length > 0 &&
+                ![payload getCString:text maxLength:textCapacity encoding:NSUTF8StringEncoding]) {
+                // Too long for the buffer: deliver an empty payload rather than a truncated path.
+                memset(text, 0, textCapacity);
             }
+        }
+        if (value != NULL) {
+            *value = [event[@"value"] intValue];
         }
         return [event[@"action"] intValue];
     }
@@ -504,7 +674,12 @@ int32_t auralis_macos_host_tick(void *handle, uint8_t loopPlayback) {
         host.playerLayer = host.pendingLayer;
         host.pendingPlayer = nil;
         host.pendingLayer = nil;
+        // The new video fades in (Core Animation's implicit 0.25 s opacity animation). Reduce Motion (Auralis setting or the macOS accessibility setting) makes
+        // the swap instant.
+        [CATransaction begin];
+        [CATransaction setDisableActions:AuralisShouldReduceMotion()];
         host.playerLayer.opacity = 1.0;
+        [CATransaction commit];
         host.loopSeekPending = NO;
     }
     AVPlayerItem *item = host.player.currentItem;
@@ -602,6 +777,733 @@ int32_t auralis_macos_host_destroy(void *handle) {
         [host.window close];
         host.window = nil;
         (void)CFBridgingRelease(handle);
+        return 1;
+    }
+}
+
+// MARK: - System queries used by the Rust adapter
+
+int32_t auralis_macos_host_telemetry(void *handle,
+                                     uint32_t *width,
+                                     uint32_t *height,
+                                     int64_t *positionMs,
+                                     int64_t *durationMs) {
+    @autoreleasepool {
+        AuralisWallpaperHost *host = AuralisHost(handle);
+        if (width != NULL) {
+            *width = 0;
+        }
+        if (height != NULL) {
+            *height = 0;
+        }
+        if (positionMs != NULL) {
+            *positionMs = -1;
+        }
+        if (durationMs != NULL) {
+            *durationMs = -1;
+        }
+        AVPlayer *player = host.player;
+        AVPlayerItem *item = player.currentItem;
+        if (item == nil) {
+            // A replacement still loading counts as active, with no details yet.
+            return host.pendingPlayer.currentItem != nil ? 1 : 0;
+        }
+        CGSize size = item.presentationSize;
+        if (size.width > 0.0 && size.height > 0.0) {
+            if (width != NULL) {
+                *width = (uint32_t)llround(size.width);
+            }
+            if (height != NULL) {
+                *height = (uint32_t)llround(size.height);
+            }
+        }
+        CMTime position = player.currentTime;
+        if (CMTIME_IS_NUMERIC(position) && positionMs != NULL) {
+            *positionMs = (int64_t)llround(CMTimeGetSeconds(position) * 1000.0);
+        }
+        CMTime duration = item.duration;
+        if (CMTIME_IS_NUMERIC(duration) && durationMs != NULL) {
+            *durationMs = (int64_t)llround(CMTimeGetSeconds(duration) * 1000.0);
+        }
+        return 1;
+    }
+}
+
+// Writes normal-layer (layer 0), on-screen windows owned by other processes. Bounds are in global
+// display coordinates with a top-left origin, matching CGDisplayBounds. Reading bounds, layer
+// and owner PID does not need Screen Recording permission; window titles are never read.
+size_t auralis_macos_copy_window_rects(AuralisRect *rects, size_t capacity) {
+    @autoreleasepool {
+        if (rects == NULL || capacity == 0) {
+            return 0;
+        }
+        CFArrayRef list = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+        if (list == NULL) {
+            return 0;
+        }
+        NSArray<NSDictionary *> *windows = CFBridgingRelease(list);
+        pid_t ownPid = getpid();
+        size_t count = 0;
+        for (NSDictionary *info in windows) {
+            if (count >= capacity) {
+                break;
+            }
+            NSNumber *layer = info[(__bridge NSString *)kCGWindowLayer];
+            NSNumber *owner = info[(__bridge NSString *)kCGWindowOwnerPID];
+            NSNumber *alpha = info[(__bridge NSString *)kCGWindowAlpha];
+            if (layer == nil || layer.intValue != 0 || owner.intValue == ownPid) {
+                continue;
+            }
+            if (alpha != nil && alpha.doubleValue <= 0.0) {
+                continue;
+            }
+            NSDictionary *boundsInfo = info[(__bridge NSString *)kCGWindowBounds];
+            CGRect bounds;
+            if (boundsInfo == nil ||
+                !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)boundsInfo, &bounds)) {
+                continue;
+            }
+            rects[count].x = bounds.origin.x;
+            rects[count].y = bounds.origin.y;
+            rects[count].width = bounds.size.width;
+            rects[count].height = bounds.size.height;
+            count++;
+        }
+        return count;
+    }
+}
+
+// Returns 1 for AC power, 2 for battery or UPS power, 0 when IOKit reports no source.
+// `percent` receives the internal battery charge (or -1); `lowPower` receives Low Power Mode.
+int32_t auralis_macos_power_source(int32_t *percent, uint8_t *lowPower) {
+    @autoreleasepool {
+        if (percent != NULL) {
+            *percent = -1;
+        }
+        if (lowPower != NULL) {
+            *lowPower = [NSProcessInfo processInfo].isLowPowerModeEnabled ? 1 : 0;
+        }
+        CFTypeRef info = IOPSCopyPowerSourcesInfo();
+        if (info == NULL) {
+            return 0;
+        }
+        int32_t source = 0;
+        CFStringRef providing = IOPSGetProvidingPowerSourceType(info);
+        if (providing != NULL) {
+            if (CFEqual(providing, CFSTR(kIOPMACPowerKey))) {
+                source = 1;
+            } else if (CFEqual(providing, CFSTR(kIOPMBatteryPowerKey)) ||
+                       CFEqual(providing, CFSTR(kIOPMUPSPowerKey))) {
+                source = 2;
+            }
+        }
+        CFArrayRef sources = IOPSCopyPowerSourcesList(info);
+        if (sources != NULL) {
+            for (CFIndex index = 0; index < CFArrayGetCount(sources); index++) {
+                CFDictionaryRef description =
+                    IOPSGetPowerSourceDescription(info, CFArrayGetValueAtIndex(sources, index));
+                if (description == NULL) {
+                    continue;
+                }
+                CFStringRef type = CFDictionaryGetValue(description, CFSTR(kIOPSTypeKey));
+                if (type == NULL || !CFEqual(type, CFSTR(kIOPSInternalBatteryType))) {
+                    continue;
+                }
+                CFNumberRef current = CFDictionaryGetValue(description, CFSTR(kIOPSCurrentCapacityKey));
+                CFNumberRef maximum = CFDictionaryGetValue(description, CFSTR(kIOPSMaxCapacityKey));
+                int currentValue = 0;
+                int maximumValue = 0;
+                if (current != NULL && maximum != NULL &&
+                    CFNumberGetValue(current, kCFNumberIntType, &currentValue) &&
+                    CFNumberGetValue(maximum, kCFNumberIntType, &maximumValue) && maximumValue > 0 &&
+                    percent != NULL) {
+                    long value = lround((double)currentValue * 100.0 / (double)maximumValue);
+                    *percent = (int32_t)(value < 0 ? 0 : (value > 100 ? 100 : value));
+                }
+                break;
+            }
+            CFRelease(sources);
+        }
+        CFRelease(info);
+        return source;
+    }
+}
+
+// Resident size, physical footprint and peak resident size from task_info(TASK_VM_INFO);
+// user plus system CPU time from getrusage. Returns 0 if either query fails.
+int32_t auralis_macos_process_metrics(uint64_t *resident,
+                                      uint64_t *footprint,
+                                      uint64_t *residentPeak,
+                                      uint64_t *cpuMs) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
+        return 0;
+    }
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) != 0) {
+        return 0;
+    }
+    if (resident != NULL) {
+        *resident = info.resident_size;
+    }
+    if (footprint != NULL) {
+        *footprint = info.phys_footprint;
+    }
+    if (residentPeak != NULL) {
+        *residentPeak = info.resident_size_peak;
+    }
+    if (cpuMs != NULL) {
+        uint64_t user = (uint64_t)usage.ru_utime.tv_sec * 1000u + (uint64_t)usage.ru_utime.tv_usec / 1000u;
+        uint64_t system = (uint64_t)usage.ru_stime.tv_sec * 1000u + (uint64_t)usage.ru_stime.tv_usec / 1000u;
+        *cpuMs = user + system;
+    }
+    return 1;
+}
+
+void auralis_macos_set_reduce_motion(uint8_t enabled) {
+    gAuralisReduceMotion = enabled != 0;
+}
+
+// MARK: - Studio window
+
+// Content view that accepts a dropped video file and hands its path to the Studio.
+@interface AuralisDropView : NSView
+@property(nonatomic, copy) void (^onDropPath)(NSString *path);
+@end
+
+@implementation AuralisDropView
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (self != nil) {
+        [self registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
+    }
+    return self;
+}
+
+- (NSURL *)videoURLFromDrag:(id<NSDraggingInfo>)sender {
+    NSArray<NSURL *> *urls = [sender.draggingPasteboard readObjectsForClasses:@[[NSURL class]]
+                                                                      options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
+    NSURL *url = urls.firstObject;
+    return AuralisIsVideoURL(url) ? url : nil;
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    return [self videoURLFromDrag:sender] != nil ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    NSURL *url = [self videoURLFromDrag:sender];
+    if (url == nil || self.onDropPath == nil) {
+        return NO;
+    }
+    self.onDropPath(url.path);
+    return YES;
+}
+@end
+
+@interface AuralisStudioController : NSObject <NSWindowDelegate>
+@property(nonatomic, strong) NSWindow *window;
+@property(nonatomic, strong) NSPopUpButton *displayPopup;
+@property(nonatomic, strong) NSTextField *pathField;
+@property(nonatomic, strong) NSView *previewView;
+@property(nonatomic, strong) NSTextField *previewPlaceholder;
+@property(nonatomic, strong) NSButton *stopPreviewButton;
+@property(nonatomic, strong) NSButton *pauseButton;
+@property(nonatomic, strong) NSButton *stopButton;
+@property(nonatomic, strong) NSButton *muteCheckbox;
+@property(nonatomic, strong) NSButton *loopCheckbox;
+@property(nonatomic, strong) NSSegmentedControl *scaleControl;
+@property(nonatomic, strong) NSTextField *volumeLabel;
+@property(nonatomic, strong) NSTextField *speedLabel;
+@property(nonatomic, strong) NSButton *fullscreenCheckbox;
+@property(nonatomic, strong) NSButton *batteryCheckbox;
+@property(nonatomic, strong) NSButton *loginCheckbox;
+@property(nonatomic, strong) NSButton *motionCheckbox;
+@property(nonatomic, strong) NSTextField *statusLabel;
+@property(nonatomic, strong) NSTextField *detailsLabel;
+@property(nonatomic, strong) NSTextField *resourcesLabel;
+@property(nonatomic, strong) AVQueuePlayer *previewPlayer;
+@property(nonatomic, strong) AVPlayerLooper *previewLooper;
+@property(nonatomic, strong) AVPlayerLayer *previewLayer;
+- (void)stopPreviewPlayer;
+@end
+
+static const CGFloat AuralisGutter = 24.0;
+static const CGFloat AuralisPreviewWidth = 512.0;
+
+static NSColor *AuralisGraphite(void) {
+    return [NSColor colorWithCalibratedWhite:0.11 alpha:1.0];
+}
+
+static NSTextField *AuralisLabel(NSString *text, BOOL semibold, BOOL secondary) {
+    NSTextField *label = [NSTextField labelWithString:text];
+    label.font = semibold ? [NSFont systemFontOfSize:NSFont.systemFontSize weight:NSFontWeightSemibold]
+                          : [NSFont systemFontOfSize:NSFont.systemFontSize];
+    label.textColor = secondary ? NSColor.secondaryLabelColor : NSColor.labelColor;
+    label.lineBreakMode = NSLineBreakByTruncatingTail;
+    label.selectable = NO;
+    return label;
+}
+
+static NSStackView *AuralisRow(NSArray<NSView *> *views) {
+    NSStackView *row = [NSStackView stackViewWithViews:views];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.alignment = NSLayoutAttributeCenterY;
+    row.spacing = 8.0;
+    return row;
+}
+
+@implementation AuralisStudioController
+- (NSButton *)button:(NSString *)title action:(SEL)action {
+    NSButton *button = [NSButton buttonWithTitle:title target:self action:action];
+    button.bezelStyle = NSBezelStyleRounded;
+    return button;
+}
+
+- (NSButton *)checkbox:(NSString *)title action:(SEL)action {
+    return [NSButton checkboxWithTitle:title target:self action:action];
+}
+
+- (NSButton *)stepButton:(NSString *)glyph accessibilityLabel:(NSString *)name action:(SEL)action {
+    NSButton *button = [self button:glyph action:action];
+    button.accessibilityLabel = name;
+    button.toolTip = name;
+    [button.widthAnchor constraintEqualToConstant:32.0].active = YES;
+    return button;
+}
+
+- (void)build {
+    NSWindow *window = [[NSWindow alloc]
+        initWithContentRect:NSMakeRect(0.0, 0.0, AuralisPreviewWidth + 2.0 * AuralisGutter, 760.0)
+                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    window.title = @"Auralis Studio";
+    window.releasedWhenClosed = NO;
+    window.delegate = self;
+    window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    window.backgroundColor = AuralisGraphite();
+    window.tabbingMode = NSWindowTabbingModeDisallowed;
+
+    AuralisDropView *content = [[AuralisDropView alloc] initWithFrame:window.contentView.bounds];
+    __weak AuralisStudioController *weakSelf = self;
+    content.onDropPath = ^(NSString *path) {
+        // Dropping only fills the field; the preview starts when the user selects Preview.
+        weakSelf.pathField.stringValue = path;
+    };
+    window.contentView = content;
+
+    // Wallpaper
+    self.displayPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.displayPopup.target = self;
+    self.displayPopup.action = @selector(selectDisplay:);
+    self.displayPopup.accessibilityLabel = @"Display";
+    NSTextField *displayLabel = AuralisLabel(@"Display", NO, YES);
+    [displayLabel.widthAnchor constraintEqualToConstant:72.0].active = YES;
+
+    self.pathField = [NSTextField textFieldWithString:@""];
+    self.pathField.placeholderString = @"Choose or drop a video file";
+    self.pathField.accessibilityLabel = @"Video file";
+    self.pathField.lineBreakMode = NSLineBreakByTruncatingHead;
+    [self.pathField setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                               forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSTextField *fileLabel = AuralisLabel(@"Video file", NO, YES);
+    [fileLabel.widthAnchor constraintEqualToConstant:72.0].active = YES;
+    NSButton *browse = [self button:@"Browse…" action:@selector(browse:)];
+    NSButton *nextRecent = [self button:@"Next recent" action:@selector(nextRecent:)];
+
+    // Preview
+    self.previewView = [[NSView alloc] initWithFrame:NSZeroRect];
+    self.previewView.wantsLayer = YES;
+    self.previewView.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.05 alpha:1.0].CGColor;
+    self.previewView.layer.cornerRadius = 8.0;
+    self.previewView.layer.masksToBounds = YES;
+    self.previewView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.previewView.widthAnchor constraintEqualToConstant:AuralisPreviewWidth].active = YES;
+    [self.previewView.heightAnchor constraintEqualToConstant:AuralisPreviewWidth * 9.0 / 16.0].active = YES;
+    self.previewView.accessibilityLabel = @"Video preview";
+    self.previewView.accessibilityRole = NSAccessibilityImageRole;
+    self.previewPlaceholder = AuralisLabel(@"Preview is stopped to save resources", NO, YES);
+    self.previewPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.previewView addSubview:self.previewPlaceholder];
+    [self.previewPlaceholder.centerXAnchor constraintEqualToAnchor:self.previewView.centerXAnchor].active = YES;
+    [self.previewPlaceholder.centerYAnchor constraintEqualToAnchor:self.previewView.centerYAnchor].active = YES;
+    NSButton *preview = [self button:@"Preview" action:@selector(preview:)];
+    self.stopPreviewButton = [self button:@"Stop preview" action:@selector(stopPreview:)];
+    self.stopPreviewButton.enabled = NO;
+
+    // Wallpaper actions
+    NSButton *apply = [self button:@"Set as wallpaper" action:@selector(apply:)];
+    apply.keyEquivalent = @"\r";
+    self.pauseButton = [self button:@"Pause wallpaper" action:@selector(togglePause:)];
+    self.stopButton = [self button:@"Stop wallpaper" action:@selector(stopWallpaper:)];
+
+    // Playback
+    self.muteCheckbox = [self checkbox:@"Mute audio" action:@selector(setMuted:)];
+    self.loopCheckbox = [self checkbox:@"Loop video" action:@selector(setLoop:)];
+    self.scaleControl = [NSSegmentedControl segmentedControlWithLabels:@[@"Fill", @"Fit"]
+                                                          trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                                target:self
+                                                                action:@selector(setScale:)];
+    self.scaleControl.accessibilityLabel = @"Scale";
+    self.scaleControl.selectedSegment = 0;
+    NSTextField *scaleLabel = AuralisLabel(@"Scale", NO, YES);
+    self.volumeLabel = AuralisLabel(@"Volume 0%", NO, NO);
+    [self.volumeLabel.widthAnchor constraintGreaterThanOrEqualToConstant:88.0].active = YES;
+    self.volumeLabel.alignment = NSTextAlignmentCenter;
+    self.speedLabel = AuralisLabel(@"Speed 1.00×", NO, NO);
+    [self.speedLabel.widthAnchor constraintGreaterThanOrEqualToConstant:88.0].active = YES;
+    self.speedLabel.alignment = NSTextAlignmentCenter;
+    NSButton *volumeDown = [self stepButton:@"−" accessibilityLabel:@"Volume down" action:@selector(volumeDown:)];
+    NSButton *volumeUp = [self stepButton:@"+" accessibilityLabel:@"Volume up" action:@selector(volumeUp:)];
+    NSButton *speedDown = [self stepButton:@"−" accessibilityLabel:@"Speed down" action:@selector(speedDown:)];
+    NSButton *speedUp = [self stepButton:@"+" accessibilityLabel:@"Speed up" action:@selector(speedUp:)];
+
+    // Behavior
+    self.fullscreenCheckbox = [self checkbox:@"Pause while a full-screen app is open"
+                                      action:@selector(setPauseOnFullscreen:)];
+    self.batteryCheckbox = [self checkbox:@"Pause on battery power" action:@selector(setPauseOnBattery:)];
+    self.loginCheckbox = [self checkbox:@"Launch at login" action:@selector(setLaunchAtLogin:)];
+    self.motionCheckbox = [self checkbox:@"Reduce motion" action:@selector(setReduceMotion:)];
+
+    // Status
+    self.statusLabel = AuralisLabel(@"No wallpaper running", YES, NO);
+    self.detailsLabel = AuralisLabel(@"", NO, YES);
+    self.resourcesLabel = AuralisLabel(@"", NO, YES);
+    NSTextField *closeHint = AuralisLabel(@"Closing this window keeps the wallpaper running.", NO, YES);
+
+    NSArray<NSView *> *sections = @[
+        AuralisLabel(@"Wallpaper", YES, NO),
+        AuralisRow(@[displayLabel, self.displayPopup]),
+        AuralisRow(@[fileLabel, self.pathField, browse, nextRecent]),
+        AuralisLabel(@"Preview", YES, NO),
+        self.previewView,
+        AuralisRow(@[preview, self.stopPreviewButton]),
+        AuralisRow(@[apply, self.pauseButton, self.stopButton]),
+        AuralisLabel(@"Playback", YES, NO),
+        AuralisRow(@[self.muteCheckbox, self.loopCheckbox, scaleLabel, self.scaleControl]),
+        AuralisRow(@[volumeDown, self.volumeLabel, volumeUp, speedDown, self.speedLabel, speedUp]),
+        AuralisLabel(@"Behavior", YES, NO),
+        self.fullscreenCheckbox,
+        self.batteryCheckbox,
+        self.loginCheckbox,
+        self.motionCheckbox,
+        self.statusLabel,
+        self.detailsLabel,
+        self.resourcesLabel,
+        closeHint,
+    ];
+    NSStackView *stack = [NSStackView stackViewWithViews:sections];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 8.0;
+    stack.edgeInsets = NSEdgeInsetsMake(AuralisGutter, AuralisGutter, AuralisGutter, AuralisGutter);
+    // 8 px rhythm: 8 inside a group, 24 before each section heading and the status block.
+    NSArray<NSView *> *groupEnds = @[sections[2], sections[6], sections[9], sections[14]];
+    for (NSView *view in groupEnds) {
+        [stack setCustomSpacing:24.0 afterView:view];
+    }
+    [stack setCustomSpacing:16.0 afterView:sections[5]];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:stack];
+    [stack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor].active = YES;
+    [stack.trailingAnchor constraintEqualToAnchor:content.trailingAnchor].active = YES;
+    [stack.topAnchor constraintEqualToAnchor:content.topAnchor].active = YES;
+    [stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor].active = YES;
+    for (NSView *view in @[sections[2], self.statusLabel, self.detailsLabel, self.resourcesLabel]) {
+        [view.widthAnchor constraintEqualToConstant:AuralisPreviewWidth].active = YES;
+    }
+
+    // Size the window to its content so the 24 px gutters hold on every edge.
+    [content layoutSubtreeIfNeeded];
+    [window setContentSize:stack.fittingSize];
+    self.window = window;
+    [window center];
+}
+
+- (void)queue:(int32_t)action value:(int32_t)value {
+    AuralisQueueAction(action, value, nil);
+}
+
+- (NSString *)pathText {
+    return [self.pathField.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+}
+
+- (void)selectDisplay:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionSelectDisplay value:(int32_t)self.displayPopup.indexOfSelectedItem];
+}
+
+- (void)browse:(id)sender {
+    (void)sender;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.allowedContentTypes = AuralisVideoTypes();
+    panel.prompt = @"Choose";
+    __weak AuralisStudioController *weakSelf = self;
+    [panel beginSheetModalForWindow:self.window
+                  completionHandler:^(NSModalResponse result) {
+                      if (result == NSModalResponseOK && panel.URL != nil) {
+                          weakSelf.pathField.stringValue = panel.URL.path;
+                      }
+                  }];
+}
+
+- (void)nextRecent:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionNextRecent value:0];
+}
+
+- (void)preview:(id)sender {
+    (void)sender;
+    AuralisQueueAction(AuralisActionPreview, 0, [self pathText]);
+}
+
+- (void)stopPreview:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionStopPreview value:0];
+}
+
+- (void)apply:(id)sender {
+    (void)sender;
+    AuralisQueueAction(AuralisActionApply, 0, [self pathText]);
+}
+
+- (void)togglePause:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionTogglePause value:0];
+}
+
+- (void)stopWallpaper:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionStop value:0];
+}
+
+- (void)setMuted:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionSetMuted value:self.muteCheckbox.state == NSControlStateValueOn ? 1 : 0];
+}
+
+- (void)setLoop:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionSetLoop value:self.loopCheckbox.state == NSControlStateValueOn ? 1 : 0];
+}
+
+- (void)setScale:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionSetAspect value:self.scaleControl.selectedSegment == 1 ? 1 : 0];
+}
+
+- (void)volumeDown:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionStepVolume value:-1];
+}
+
+- (void)volumeUp:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionStepVolume value:1];
+}
+
+- (void)speedDown:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionStepSpeed value:-1];
+}
+
+- (void)speedUp:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionStepSpeed value:1];
+}
+
+- (void)setPauseOnFullscreen:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionSetPauseOnFullscreen
+          value:self.fullscreenCheckbox.state == NSControlStateValueOn ? 1 : 0];
+}
+
+- (void)setPauseOnBattery:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionSetPauseOnBattery value:self.batteryCheckbox.state == NSControlStateValueOn ? 1 : 0];
+}
+
+- (void)setLaunchAtLogin:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionSetLaunchAtLogin value:self.loginCheckbox.state == NSControlStateValueOn ? 1 : 0];
+}
+
+- (void)setReduceMotion:(id)sender {
+    (void)sender;
+    [self queue:AuralisActionSetReduceMotion value:self.motionCheckbox.state == NSControlStateValueOn ? 1 : 0];
+}
+
+- (void)stopPreviewPlayer {
+    [self.previewPlayer pause];
+    [self.previewLooper disableLooping];
+    [self.previewPlayer removeAllItems];
+    [self.previewLayer removeFromSuperlayer];
+    self.previewLooper = nil;
+    self.previewPlayer = nil;
+    self.previewLayer = nil;
+    self.previewPlaceholder.hidden = NO;
+    self.stopPreviewButton.enabled = NO;
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    (void)notification;
+    // Closing the Studio never stops the wallpaper; it only releases the preview decoder.
+    [self stopPreviewPlayer];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    [self queue:AuralisActionStudioClosed value:0];
+}
+@end
+
+static void AuralisSetCheckbox(NSButton *checkbox, uint8_t on) {
+    NSControlStateValue state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    if (checkbox.state != state) {
+        checkbox.state = state;
+    }
+}
+
+static void AuralisStudioClose(void) {
+    AuralisStudioController *studio = gAuralisStudio;
+    if (studio == nil) {
+        return;
+    }
+    [studio stopPreviewPlayer];
+    studio.window.delegate = nil;
+    [studio.window close];
+    gAuralisStudio = nil;
+}
+
+void auralis_macos_studio_open(void) {
+    @autoreleasepool {
+        if (gAuralisStudio == nil) {
+            gAuralisStudio = [[AuralisStudioController alloc] init];
+            [gAuralisStudio build];
+        }
+        NSApplication *application = [NSApplication sharedApplication];
+        // An LSUIElement app has no Dock icon and cannot normally take focus; become a regular
+        // app while the Studio is open, then return to accessory when it closes.
+        [application setActivationPolicy:NSApplicationActivationPolicyRegular];
+        gAuralisStudio.window.animationBehavior =
+            AuralisShouldReduceMotion() ? NSWindowAnimationBehaviorNone : NSWindowAnimationBehaviorDefault;
+        [gAuralisStudio.window makeKeyAndOrderFront:nil];
+        [application activateIgnoringOtherApps:YES];
+    }
+}
+
+void auralis_macos_studio_set_displays(const char *labels, int32_t selected) {
+    @autoreleasepool {
+        AuralisStudioController *studio = gAuralisStudio;
+        if (studio == nil) {
+            return;
+        }
+        NSString *joined = AuralisString(labels);
+        NSArray<NSString *> *titles = joined.length > 0 ? [joined componentsSeparatedByString:@"\n"] : @[];
+        [studio.displayPopup removeAllItems];
+        [studio.displayPopup addItemsWithTitles:titles];
+        if (selected >= 0 && selected < (int32_t)studio.displayPopup.numberOfItems) {
+            [studio.displayPopup selectItemAtIndex:selected];
+        }
+        studio.displayPopup.enabled = titles.count > 1;
+    }
+}
+
+void auralis_macos_studio_set_path(const char *path) {
+    @autoreleasepool {
+        gAuralisStudio.pathField.stringValue = AuralisString(path);
+    }
+}
+
+void auralis_macos_studio_update(const AuralisStudioState *state) {
+    @autoreleasepool {
+        AuralisStudioController *studio = gAuralisStudio;
+        if (studio == nil || state == NULL) {
+            return;
+        }
+        studio.statusLabel.stringValue = AuralisString(state->status);
+        studio.detailsLabel.stringValue = AuralisString(state->details);
+        studio.resourcesLabel.stringValue = AuralisString(state->resources);
+        studio.volumeLabel.stringValue = AuralisString(state->volumeLabel);
+        studio.speedLabel.stringValue = AuralisString(state->speedLabel);
+        studio.pauseButton.title = AuralisString(state->pauseLabel);
+        studio.pauseButton.enabled = state->controlsEnabled != 0;
+        studio.stopButton.enabled = state->controlsEnabled != 0;
+        studio.stopPreviewButton.enabled = state->previewActive != 0;
+        AuralisSetCheckbox(studio.muteCheckbox, state->muted);
+        AuralisSetCheckbox(studio.loopCheckbox, state->loopPlayback);
+        studio.scaleControl.selectedSegment = state->fitAspect ? 1 : 0;
+        AuralisSetCheckbox(studio.fullscreenCheckbox, state->pauseOnFullscreen);
+        AuralisSetCheckbox(studio.batteryCheckbox, state->pauseOnBattery);
+        AuralisSetCheckbox(studio.loginCheckbox, state->launchAtLogin);
+        AuralisSetCheckbox(studio.motionCheckbox, state->reduceMotion);
+    }
+}
+
+int32_t auralis_macos_studio_start_preview(const char *path, uint8_t fitAspect) {
+    @autoreleasepool {
+        AuralisStudioController *studio = gAuralisStudio;
+        if (studio == nil || path == NULL) {
+            return 0;
+        }
+        NSURL *url = [NSURL fileURLWithFileSystemRepresentation:path isDirectory:NO relativeToURL:nil];
+        if (url == nil) {
+            return 0;
+        }
+        [studio stopPreviewPlayer];
+        AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
+        AVQueuePlayer *player = [AVQueuePlayer queuePlayerWithItems:@[]];
+        player.muted = YES;
+        player.allowsExternalPlayback = NO;
+        AVPlayerLooper *looper = [AVPlayerLooper playerLooperWithPlayer:player templateItem:item];
+        AVPlayerLayer *layer = [AVPlayerLayer playerLayerWithPlayer:player];
+        layer.frame = studio.previewView.bounds;
+        layer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+        layer.videoGravity = fitAspect ? AVLayerVideoGravityResizeAspect : AVLayerVideoGravityResizeAspectFill;
+        [studio.previewView.layer addSublayer:layer];
+        studio.previewPlayer = player;
+        studio.previewLooper = looper;
+        studio.previewLayer = layer;
+        studio.previewPlaceholder.hidden = YES;
+        studio.stopPreviewButton.enabled = YES;
+        [player play];
+        return 1;
+    }
+}
+
+void auralis_macos_studio_stop_preview(void) {
+    @autoreleasepool {
+        [gAuralisStudio stopPreviewPlayer];
+    }
+}
+
+// Returns 1 and writes a message when the running preview failed to load or play.
+int32_t auralis_macos_studio_preview_error(char *message, size_t capacity) {
+    @autoreleasepool {
+        AuralisStudioController *studio = gAuralisStudio;
+        if (message != NULL && capacity > 0) {
+            message[0] = '\0';
+        }
+        if (studio.previewPlayer == nil) {
+            return 0;
+        }
+        NSError *error = nil;
+        if (studio.previewLooper.status == AVPlayerLooperStatusFailed) {
+            error = studio.previewLooper.error;
+        } else if (studio.previewPlayer.currentItem.status == AVPlayerItemStatusFailed) {
+            error = studio.previewPlayer.currentItem.error;
+        } else if (studio.previewPlayer.status == AVPlayerStatusFailed) {
+            error = studio.previewPlayer.error;
+        } else {
+            return 0;
+        }
+        if (message != NULL && capacity > 0) {
+            const char *text = error.localizedDescription.UTF8String ?: "AVFoundation could not play this video";
+            snprintf(message, capacity, "%s", text);
+        }
         return 1;
     }
 }

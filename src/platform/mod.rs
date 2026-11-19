@@ -9,6 +9,7 @@ use std::path::Path;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod macos_studio;
 #[cfg(target_os = "windows")]
 pub mod windows;
 #[cfg(target_os = "windows")]
