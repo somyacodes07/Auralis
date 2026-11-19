@@ -10,6 +10,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - CI now runs `cargo deny` (RustSec advisories, a license allow-list, duplicate-version warnings, and crates.io-only sources) on every pull request and push to `main`, and silently installs and uninstalls the Windows installer as a smoke test.
 - The desktop app and `auralis play` now write a diagnostics log with startup, wallpaper apply/restore failures, playback errors, configuration recovery, and crash details (panic message and location). It lives in `%LOCALAPPDATA%\Auralis\logs` on Windows and `~/Library/Logs/Auralis` on macOS, rotates at 1 MB, and records media by file name only. `auralis status` shows its path.
 - `auralis.exe` now has the Auralis icon in Explorer and version details (product name, description, version, copyright) in its file properties. CI checks that release builds include them.
+- `auralis quit` asks a running Windows Studio to quit and restore the desktop, waits up to 5 seconds, and exits 0 when Auralis quit or was not running (for installers and uninstallers).
+- The Windows Studio's Wallpaper card shows what the selected display is playing: file name (never the full path), video resolution, and state.
+- The Windows Studio can be used from the keyboard: Tab and Shift+Tab move through the controls in visual order, and Space or Enter activates the focused control.
 - macOS builds now ship as one universal (Apple Silicon and Intel) `.dmg` with drag-to-Applications install, replacing the single-architecture `.app.zip` and CLI `.tar.gz`. The app is ad-hoc signed and requires macOS 13 or later.
 - Every merge to `main` is now built on Windows and macOS and published as a numbered GitHub prerelease tagged `v<version>+build.<N>`. The build number appears in the Studio title, tray tooltip, `auralis status`, and the macOS bundle version.
 - Added a matching monochrome Auralis wordmark and square mark, plus an app-owned Windows icon for the Studio and system tray.
@@ -18,6 +21,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Added MIT and Apache-2.0 license texts, a dependency license inventory, contribution/security guidance, and a native platform acceptance matrix.
 
 ### Fixed
+- After Windows Explorer restarts, the Studio re-adds its tray icon and re-creates the desktop wallpaper, which Explorer destroyed. On current Windows 11 builds a restarted Explorer also needed a different request to create the wallpaper layer.
+- The Windows Studio re-lays out its controls and fonts when moved to a monitor with a different scale factor, instead of keeping the size it opened with.
+- Only one Windows Studio runs per user, even when two launches race. Opening a video with `auralis.exe` while the Studio runs sets it as the primary display's wallpaper in the running Studio instead of starting a second copy.
+- The Windows Studio saves settings and removes its wallpaper when Windows signs out or shuts down.
+- When sign-in startup is on, the Studio updates the sign-in entry to point at its current location if Auralis was moved or reinstalled elsewhere.
+- Fixed the Studio sometimes showing blank cards when restored from the tray.
 - Fixed the `&` in "Quit & restore desktop" rendering as an underline mnemonic and the header live label being clipped.
 - The Windows Studio now closes the stray console window Windows opens when `auralis.exe` is launched from Explorer, the Start menu, or the sign-in entry. Selecting text in that console could suspend log output and stall the Studio. CLI commands run from a terminal still print normally.
 

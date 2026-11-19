@@ -310,6 +310,37 @@ impl WindowsPlatformAdapter {
             }
         }
 
+        // A freshly restarted Explorer on current Windows 11 builds ignores 0x052C with zero
+        // parameters and only creates the wallpaper WorkerW (as a child of Progman) when asked
+        // with wParam 0xD / lParam 1. Verified by restarting explorer.exe on build 26300.
+        if context.target_workerw.is_null() {
+            // SAFETY: Same call as above with the alternative parameters; the output pointer is
+            // a valid local.
+            unsafe {
+                SendMessageTimeoutW(
+                    progman,
+                    WM_SPAWN_WORKERW,
+                    0xD,
+                    1,
+                    SMTO_NORMAL,
+                    1000,
+                    &mut send_result,
+                );
+            }
+            // SAFETY: Searches for the WorkerW child Progman creates in response.
+            let workerw_in_progman = unsafe {
+                FindWindowExW(
+                    progman,
+                    std::ptr::null_mut(),
+                    context.workerw_class.as_ptr(),
+                    std::ptr::null(),
+                )
+            };
+            if !workerw_in_progman.is_null() {
+                context.target_workerw = workerw_in_progman;
+            }
+        }
+
         if context.target_workerw.is_null() {
             return Err(PlatformError::WorkerWCreationFailed(
                 "Could not find WorkerW sibling or child of Progman".to_string(),
@@ -681,6 +712,21 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         Ok(())
     }
 
+    fn is_wallpaper_host_attached(&mut self, window_hwnd: isize) -> bool {
+        let hwnd = window_hwnd as HWND;
+        // SAFETY: IsWindow only queries the OS window table for this handle value.
+        if hwnd.is_null() || unsafe { IsWindow(hwnd) } == 0 {
+            return false;
+        }
+        // While Explorer is restarting there may be no WorkerW yet; the live host is reported
+        // as attached so it is not torn down before a new desktop layer exists.
+        match self.get_or_spawn_workerw() {
+            // SAFETY: IsChild only compares two window handles in the OS window table.
+            Ok(workerw) => (unsafe { IsChild(workerw, hwnd) }) != 0,
+            Err(_) => true,
+        }
+    }
+
     fn attach_to_desktop(
         &mut self,
         _display_id: &str,
@@ -906,11 +952,7 @@ impl PlatformAdapter for WindowsPlatformAdapter {
                     "Failed to resolve current executable path: {e}"
                 ))
             })?;
-            let clean_exe = exe_path
-                .to_string_lossy()
-                .trim_start_matches(r"\\?\")
-                .to_string();
-            let command = format!("\"{clean_exe}\" gui --minimized");
+            let command = startup_command_for(&exe_path);
             let cmd_wide = wide_string(&command);
             let byte_len = (cmd_wide.len() * mem::size_of::<u16>()) as u32;
 
@@ -1001,6 +1043,54 @@ pub(crate) fn sanitize_display_id(device_name: &str, fallback_index: usize) -> S
     }
 }
 
+/// The sign-in command stored under the `Run` key for the executable at `exe_path`.
+pub(crate) fn startup_command_for(exe_path: &Path) -> String {
+    let lossy = exe_path.to_string_lossy();
+    let clean_exe = lossy.trim_start_matches(r"\\?\");
+    format!("\"{clean_exe}\" gui --minimized")
+}
+
+/// Whether a stored sign-in command already launches `expected` (Windows paths compare
+/// case-insensitively, so a differently cased but identical path is not rewritten).
+pub(crate) fn startup_command_matches(stored: &str, expected: &str) -> bool {
+    stored.trim().eq_ignore_ascii_case(expected.trim())
+}
+
+/// Read the current `HKCU\...\Run\Auralis` command, if one is registered.
+pub(crate) fn read_startup_command() -> Option<String> {
+    let subkey = wide_string(RUN_REGISTRY_SUBKEY);
+    let value_name = wide_string(RUN_REGISTRY_VALUE_NAME);
+    let mut hkey: HKEY = std::ptr::null_mut();
+    // SAFETY: RegOpenKeyExW opens the per-user Run key read-only into a local handle.
+    let status =
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) };
+    if status != 0 || hkey.is_null() {
+        return None;
+    }
+    let mut data_type: u32 = 0;
+    let mut buffer = vec![0u16; 2048];
+    let mut byte_len = (buffer.len() * mem::size_of::<u16>()) as u32;
+    // SAFETY: The destination buffer holds `byte_len` bytes; the key handle is open.
+    let query_status = unsafe {
+        RegQueryValueExW(
+            hkey,
+            value_name.as_ptr(),
+            std::ptr::null(),
+            &mut data_type,
+            buffer.as_mut_ptr().cast::<u8>(),
+            &mut byte_len,
+        )
+    };
+    // SAFETY: Closes the registry key opened above.
+    unsafe { RegCloseKey(hkey) };
+    if query_status != 0 || data_type != REG_SZ {
+        return None;
+    }
+    let units = (byte_len as usize / mem::size_of::<u16>()).min(buffer.len());
+    let command = string_from_wide(&buffer[..units]);
+    (!command.trim().is_empty()).then_some(command)
+}
+
 /// Converts a Rust string slice to a null-terminated UTF-16 wide string.
 pub(crate) fn wide_string(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -1036,6 +1126,27 @@ mod tests {
         assert_eq!(sanitize_display_id(r"\\.\DISPLAY1", 1), "DISPLAY1");
         assert_eq!(sanitize_display_id(r"\\.\DISPLAY2", 2), "DISPLAY2");
         assert_eq!(sanitize_display_id("", 3), "DISPLAY3");
+    }
+
+    #[test]
+    fn startup_command_quotes_the_exe_and_strips_the_verbatim_prefix() {
+        assert_eq!(
+            startup_command_for(Path::new(r"\\?\C:\Program Files\Auralis\auralis.exe")),
+            r#""C:\Program Files\Auralis\auralis.exe" gui --minimized"#
+        );
+    }
+
+    #[test]
+    fn startup_command_match_ignores_case_but_not_location() {
+        let expected = r#""C:\Apps\Auralis\auralis.exe" gui --minimized"#;
+        assert!(startup_command_matches(
+            r#""c:\apps\auralis\AURALIS.exe" gui --minimized"#,
+            expected
+        ));
+        assert!(!startup_command_matches(
+            r#""C:\Old\auralis.exe" gui --minimized"#,
+            expected
+        ));
     }
 
     #[test]

@@ -55,6 +55,7 @@ fn main() -> ExitCode {
             }
         }
         "verify-desktop" => run_verify_desktop(),
+        "quit" => run_quit(),
         "--help" | "-h" | "help" => {
             print_help();
             ExitCode::SUCCESS
@@ -88,6 +89,41 @@ fn print_help() {
     println!(
         "  auralis verify-desktop               Check native wallpaper host creation and cleanup"
     );
+    println!(
+        "  auralis quit                         Quit the running app and restore the desktop (Windows)"
+    );
+}
+
+/// Ask a running Studio to quit and restore the desktop; used by installers and uninstallers.
+/// Exits 0 when no instance runs or it quit, non-zero if it was still running after 5 seconds.
+fn run_quit() -> ExitCode {
+    #[cfg(target_os = "windows")]
+    {
+        use auralis::platform::windows_gui::{quit_running_instance, QuitOutcome};
+        match quit_running_instance(Duration::from_secs(5)) {
+            QuitOutcome::NotRunning => {
+                println!("Auralis is not running.");
+                ExitCode::SUCCESS
+            }
+            QuitOutcome::Quit => {
+                println!("Auralis quit and restored the desktop.");
+                ExitCode::SUCCESS
+            }
+            QuitOutcome::TimedOut => {
+                eprintln!(
+                    "Auralis did not quit within 5 seconds. Choose Quit from its tray icon menu, then try again."
+                );
+                ExitCode::FAILURE
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        eprintln!(
+            "auralis quit is available on Windows only. Quit Auralis from its menu bar icon."
+        );
+        ExitCode::FAILURE
+    }
 }
 
 /// Start the diagnostics log for long-running commands. One-shot CLI commands print to the
