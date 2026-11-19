@@ -244,6 +244,9 @@ void auralis_macos_pump_events(void) {
             [application sendEvent:event];
         }
         [application updateWindows];
+        // Commit pending Core Animation changes (layer swaps) because this loop is pumped
+        // manually instead of by -[NSApplication run].
+        [CATransaction flush];
     }
 }
 
@@ -292,7 +295,11 @@ void *auralis_macos_host_create(uint32_t displayID) {
         AuralisWallpaperHost *host = [[AuralisWallpaperHost alloc] init];
         host.displayID = displayID;
         host.playbackRate = 1.0f;
-        NSWindow *window = [[NSWindow alloc] initWithContentRect:screen.frame
+        // With a `screen:` argument AppKit interprets the content rect relative to that screen's
+        // origin, so passing the global `screen.frame` would push windows on secondary displays
+        // off screen. Create at the local origin, then set the global frame explicitly.
+        NSRect localRect = NSMakeRect(0.0, 0.0, screen.frame.size.width, screen.frame.size.height);
+        NSWindow *window = [[NSWindow alloc] initWithContentRect:localRect
                                                        styleMask:NSWindowStyleMaskBorderless
                                                          backing:NSBackingStoreBuffered
                                                            defer:NO
@@ -300,6 +307,7 @@ void *auralis_macos_host_create(uint32_t displayID) {
         if (window == nil) {
             return NULL;
         }
+        [window setFrame:screen.frame display:NO];
         window.releasedWhenClosed = NO;
         window.opaque = YES;
         window.hasShadow = NO;
@@ -325,9 +333,20 @@ int32_t auralis_macos_host_attach(void *handle) {
         if (host.window == nil) {
             return 0;
         }
-        // This is the standard desktop window level; desktop icons and ordinary windows remain above it.
-        host.window.level = CGWindowLevelForKey(kCGDesktopWindowLevelKey);
+        // kCGDesktopWindowLevel is the level the system desktop picture itself uses, so a window
+        // there can stay hidden behind the picture. One level below the Finder desktop-icon
+        // level sits above the desktop picture while icons and ordinary windows stay above it.
+        host.window.level = CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) - 1;
+        NSScreen *screen = AuralisScreen(host.displayID);
+        if (screen != nil) {
+            [host.window setFrame:screen.frame display:YES];
+        }
         [host.window orderFrontRegardless];
+        if (!host.window.isVisible) {
+            snprintf(host->lastError, sizeof(host->lastError), "%s",
+                     "macOS did not show the wallpaper window");
+            return 0;
+        }
         return 1;
     }
 }
@@ -527,6 +546,35 @@ int32_t auralis_macos_host_tick(void *handle, uint8_t loopPlayback) {
               }];
     }
     return 0;
+}
+
+int32_t auralis_macos_host_describe(void *handle, char *buffer, size_t capacity) {
+    @autoreleasepool {
+        AuralisWallpaperHost *host = AuralisHost(handle);
+        if (buffer == NULL || capacity == 0) {
+            return 0;
+        }
+        buffer[0] = ' ';
+        if (host.window == nil) {
+            snprintf(buffer, capacity, "%s", "no host window");
+            return 0;
+        }
+        NSWindow *window = host.window;
+        NSRect frame = window.frame;
+        NSScreen *screen = AuralisScreen(host.displayID);
+        NSRect screenFrame = screen != nil ? screen.frame : NSZeroRect;
+        snprintf(buffer, capacity,
+                 "window %ld, level %ld (desktop %d, desktop icons %d), frame %.0f,%.0f %.0fx%.0f, "
+                 "screen %s %.0f,%.0f %.0fx%.0f, visible %s, on active space %s, occlusion visible %s",
+                 (long)window.windowNumber, (long)window.level,
+                 (int)CGWindowLevelForKey(kCGDesktopWindowLevelKey),
+                 (int)CGWindowLevelForKey(kCGDesktopIconWindowLevelKey), frame.origin.x, frame.origin.y,
+                 frame.size.width, frame.size.height, screen != nil ? "found" : "missing",
+                 screenFrame.origin.x, screenFrame.origin.y, screenFrame.size.width, screenFrame.size.height,
+                 window.isVisible ? "yes" : "no", window.isOnActiveSpace ? "yes" : "no",
+                 (window.occlusionState & NSWindowOcclusionStateVisible) ? "yes" : "no");
+        return 1;
+    }
 }
 
 const char *auralis_macos_host_last_error(void *handle) {

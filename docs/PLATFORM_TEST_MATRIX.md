@@ -9,8 +9,15 @@ GitHub Actions compile and test the Rust and native bridge code on native Window
 
 Record OS version, device model, display layout, video codec/profile/resolution/frame rate, and any known failures with the test result. Do not infer desktop behavior from compilation alone.
 
+## Recorded results
+
+| Date | Platform | Build | Result | Notes |
+| --- | --- | --- | --- | --- |
+| 2026-11-19 | macOS 15 (Sequoia) or newer, Apple Silicon (exact version and model to be recorded) | `main` before the host-visibility fix (menu-bar app) | **FAIL** | User report: after selecting a video from the menu bar, the original desktop picture stays unchanged (no black window, no error). Cause found in code: the AppKit host window was created but never ordered on screen, and its level matched the system desktop picture. Fix pending user retest. |
+
 ## Current status
 
 - Windows desktop layering and playback code are implemented. Per-release interactive acceptance remains required across supported Windows configurations.
-- macOS now has a native menu-bar controller, AVFoundation player, AppKit host, and lifecycle hooks. The native path compiles in CI, but visual layering and interactive playback have not yet been accepted on a real Mac.
+- macOS now has a native menu-bar controller, AVFoundation player, AppKit host, and lifecycle hooks. The native path compiles in CI. The first real-Mac report (above) failed: the wallpaper never became visible. The host-visibility fix still needs a retest on that Mac.
+- To diagnose a macOS host on a real Mac, run `/Applications/Auralis.app/Contents/MacOS/Auralis verify-desktop` in Terminal and include its `Host window:` line (window number, level, frame, visibility, active Space) in the test record.
 - The macOS menu-bar app does not include the Windows Studio window, embedded preview, or measured process/GPU telemetry.

@@ -441,6 +441,18 @@ fn run_verify_desktop() -> ExitCode {
     match adapter.create_wallpaper_host_window(primary) {
         Ok(hwnd) => {
             println!("[PASS] Created native wallpaper host window (handle: 0x{hwnd:X}).");
+            #[cfg(target_os = "macos")]
+            {
+                // Let AppKit order the window before reporting its on-screen state.
+                for _ in 0..20 {
+                    auralis::platform::macos::pump_native_events();
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                println!(
+                    "       Host window: {}",
+                    auralis::platform::macos::describe_host_window(hwnd)
+                );
+            }
             if let Err(e) = adapter.destroy_wallpaper_host_window(hwnd) {
                 eprintln!("[FAIL] Failed to clean up host window: {e}");
                 return ExitCode::FAILURE;

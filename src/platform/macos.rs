@@ -83,6 +83,11 @@ extern "C" {
     fn auralis_macos_host_set_aspect(handle: *mut std::ffi::c_void, fit_aspect: u8) -> i32;
     fn auralis_macos_host_tick(handle: *mut std::ffi::c_void, loop_playback: u8) -> i32;
     fn auralis_macos_host_last_error(handle: *mut std::ffi::c_void) -> *const c_char;
+    fn auralis_macos_host_describe(
+        handle: *mut std::ffi::c_void,
+        buffer: *mut c_char,
+        capacity: usize,
+    ) -> i32;
     fn auralis_macos_host_detach(handle: *mut std::ffi::c_void) -> i32;
     fn auralis_macos_host_destroy(handle: *mut std::ffi::c_void) -> i32;
 }
@@ -253,7 +258,20 @@ impl PlatformAdapter for MacOsPlatformAdapter {
         let handle = unsafe { auralis_macos_host_create(display_id) };
         if handle.is_null() {
             return Err(PlatformError::WindowCreationFailed(format!(
-                "Could not create an AppKit wallpaper host for {}",
+                "Could not create an AppKit wallpaper host for {} (no matching NSScreen)",
+                display.id
+            )));
+        }
+        // The engine expects `create_wallpaper_host_window` to return a host that is already
+        // placed on the desktop (the Windows adapter parents it into WorkerW here). Without this
+        // the AppKit window was created but never ordered on screen, so nothing was visible.
+        // SAFETY: `handle` was just returned non-null by the bridge and is live.
+        if unsafe { auralis_macos_host_attach(handle) } == 0 {
+            let detail = host_last_error(handle as isize);
+            // SAFETY: Releases the host created above exactly once.
+            unsafe { auralis_macos_host_destroy(handle) };
+            return Err(PlatformError::AttachmentFailed(format!(
+                "Could not show the wallpaper window on {}: {detail}",
                 display.id
             )));
         }
@@ -449,16 +467,9 @@ impl PlatformAdapter for MacOsPlatformAdapter {
         if result >= 0 {
             return Ok(());
         }
-        // SAFETY: The bridge returns a NUL-terminated error buffer owned by the host.
-        let error = unsafe { auralis_macos_host_last_error(native_handle(window_hwnd)) };
-        let detail = if error.is_null() {
-            "AVFoundation playback failed".to_string()
-        } else {
-            unsafe { CStr::from_ptr(error) }
-                .to_string_lossy()
-                .into_owned()
-        };
-        Err(PlatformError::MediaPlaybackFailed(detail))
+        Err(PlatformError::MediaPlaybackFailed(host_last_error(
+            window_hwnd,
+        )))
     }
 
     fn query_process_metrics(&self) -> Option<ProcessResourceMetrics> {
@@ -525,6 +536,40 @@ impl PlatformAdapter for MacOsPlatformAdapter {
 
 fn native_handle(handle: isize) -> *mut std::ffi::c_void {
     handle as *mut std::ffi::c_void
+}
+
+/// Last error recorded by a host, or a generic message when none was recorded.
+fn host_last_error(handle: isize) -> String {
+    // SAFETY: `handle` is a live host; the bridge returns a NUL-terminated buffer it owns.
+    let error = unsafe { auralis_macos_host_last_error(native_handle(handle)) };
+    let detail = if error.is_null() {
+        String::new()
+    } else {
+        // SAFETY: Non-null pointers from the bridge are NUL-terminated and valid for this call.
+        unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    if detail.is_empty() {
+        "AVFoundation playback failed".to_string()
+    } else {
+        detail
+    }
+}
+
+/// Describe a live host window (number, level, frame, visibility, Space) for diagnostics such
+/// as `auralis verify-desktop`.
+#[must_use]
+pub fn describe_host_window(handle: isize) -> String {
+    let mut buffer = [c_char::default(); 1024];
+    // SAFETY: The bridge writes a NUL-terminated string of at most `buffer.len()` bytes.
+    unsafe {
+        auralis_macos_host_describe(native_handle(handle), buffer.as_mut_ptr(), buffer.len())
+    };
+    // SAFETY: The bridge always NUL-terminates `buffer` when capacity is non-zero.
+    unsafe { CStr::from_ptr(buffer.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Pump AppKit events for command-line playback on the process's main thread.
