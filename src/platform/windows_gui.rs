@@ -3531,7 +3531,7 @@ fn browse_video_file(owner: HWND) -> Option<PathBuf> {
         "Supported Video Files (*.mp4;*.mov;*.mkv;*.webm;*.m4v)\0*.mp4;*.mov;*.mkv;*.webm;*.m4v\0All Files (*.*)\0*.*\0\0"
             .encode_utf16()
             .collect();
-    let title = wide_string("Select Live Wallpaper Video");
+    let title = wide_string("Choose a video for Auralis");
 
     // SAFETY: OPENFILENAMEW is a plain C struct initialized with valid pointers for GetOpenFileNameW.
     let mut ofn: OPENFILENAMEW = unsafe { mem::zeroed() };

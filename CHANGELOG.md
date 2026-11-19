@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - `auralis quit` asks a running Windows Studio to quit and restore the desktop, waits up to 5 seconds, and exits 0 when Auralis quit or was not running (for installers and uninstallers).
 - The Windows Studio's Wallpaper card shows what the selected display is playing: file name (never the full path), video resolution, and state.
 - The Windows Studio can be used from the keyboard: Tab and Shift+Tab move through the controls in visual order, and Space or Enter activates the focused control.
+- Added a macOS Studio window, opened from **Open Auralis Studio…** (Cmd-,) in the menu bar and on launch when no wallpaper is running. It mirrors the Windows Studio: display selection, Browse, drag and drop, Next recent, an on-demand preview, Set as wallpaper, pause/resume, stop, mute, loop, volume, speed, Fill/Fit, behavior settings, and live status. Closing it keeps the wallpaper running. Not yet tested on a real Mac.
+- macOS now pauses for full-screen apps (on-screen window list) and reads battery state through IOKit, and reports process memory, CPU time, and wallpaper resolution/position.
 - macOS builds now ship as one universal (Apple Silicon and Intel) `.dmg` with drag-to-Applications install, replacing the single-architecture `.app.zip` and CLI `.tar.gz`. The app is ad-hoc signed and requires macOS 13 or later.
 - Every merge to `main` is now built on Windows and macOS and published as a numbered GitHub prerelease tagged `v<version>+build.<N>`. The build number appears in the Studio title, tray tooltip, `auralis status`, and the macOS bundle version.
 - Added a matching monochrome Auralis wordmark and square mark, plus an app-owned Windows icon for the Studio and system tray.
@@ -27,6 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - The Windows Studio saves settings and removes its wallpaper when Windows signs out or shuts down.
 - When sign-in startup is on, the Studio updates the sign-in entry to point at its current location if Auralis was moved or reinstalled elsewhere.
 - Fixed the Studio sometimes showing blank cards when restored from the tray.
+- Fixed the macOS wallpaper never appearing after a video was selected: the AppKit host window was created but never ordered on screen. It is now shown when created, placed one level below the Finder desktop icons (above the system desktop picture), and positioned correctly on secondary displays. If macOS does not show it, Auralis now reports an error instead of failing silently. `auralis verify-desktop` on macOS prints the host window's level, frame, and visibility. Not yet retested on a real Mac.
 - Fixed the `&` in "Quit & restore desktop" rendering as an underline mnemonic and the header live label being clipped.
 - The Windows Studio now closes the stray console window Windows opens when `auralis.exe` is launched from Explorer, the Start menu, or the sign-in entry. Selecting text in that console could suspend log output and stall the Studio. CLI commands run from a terminal still print normally.
 
@@ -94,5 +97,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Known Limitations
 - macOS visual desktop layering, playback, display/sleep lifecycle, and startup behavior still need manual acceptance testing on an interactive Mac; CI compilation does not verify them.
-- macOS does not yet provide the Windows Studio window, embedded preview, process/GPU telemetry, or a universal/signed/notarized installer.
+- macOS does not report GPU memory and is not signed or notarized. The macOS Studio window has not been tested on a real Mac.
 - Windows native layering and playback also require manual acceptance on supported Windows configurations; CI compilation is not proof of visual desktop behavior.

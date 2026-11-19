@@ -57,7 +57,14 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=auralis_macos_native");
-    for framework in ["AppKit", "AVFoundation", "QuartzCore", "CoreGraphics"] {
+    for framework in [
+        "AppKit",
+        "AVFoundation",
+        "QuartzCore",
+        "CoreGraphics",
+        "IOKit",
+        "UniformTypeIdentifiers",
+    ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
 }
