@@ -285,6 +285,11 @@ impl AppConfig {
                     "Configuration at '{}' could not be loaded: {err}{backup_note}. Using safe defaults.",
                     path.display()
                 );
+                // Log file names only; the full paths contain the user's profile folder.
+                crate::diagnostics::warn(&crate::diagnostics::redact_path(
+                    &crate::diagnostics::redact_path(&warning, &backup_path),
+                    path,
+                ));
                 (Self::default(), Some(warning))
             }
         }

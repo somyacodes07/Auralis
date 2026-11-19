@@ -4,6 +4,7 @@
 //! and native platform adapters without coupling to OS-specific types.
 
 use crate::config::{AppConfig, DisplayWallpaperConfig, VideoAspectMode};
+use crate::diagnostics;
 use crate::media::MediaController;
 use crate::platform::{
     DisplayInfo, PlatformAdapter, PlatformError, PowerStatus, ProcessResourceMetrics,
@@ -124,6 +125,21 @@ impl WallpaperEngine {
     /// Preserves the previous working wallpaper if validation, window creation, or native media
     /// loading fails (`AGENTS.md` Principle 9).
     pub fn apply_wallpaper(&mut self, display_id: &str, media_path: PathBuf) -> Result<(), String> {
+        let file_name = diagnostics::file_name_only(&media_path);
+        let result = self.try_apply_wallpaper(display_id, media_path.clone());
+        match &result {
+            Ok(()) => diagnostics::info(&format!(
+                "Applied wallpaper '{file_name}' on display {display_id}"
+            )),
+            Err(err) => diagnostics::warn(&format!(
+                "Applying wallpaper '{file_name}' on display {display_id} failed: {}",
+                diagnostics::redact_path(err, &media_path)
+            )),
+        }
+        result
+    }
+
+    fn try_apply_wallpaper(&mut self, display_id: &str, media_path: PathBuf) -> Result<(), String> {
         let display = self
             .displays
             .iter()
@@ -487,6 +503,11 @@ impl WallpaperEngine {
             }
         }
         if let Some((id, path, error)) = playback_failure {
+            diagnostics::error(&format!(
+                "Playback of '{}' on display {id} failed: {}",
+                diagnostics::file_name_only(&path),
+                diagnostics::redact_path(&error.to_string(), &path)
+            ));
             if let Some(controller) = self.controllers.get_mut(&id) {
                 controller.state = crate::media::PlaybackState::Failed {
                     path,

@@ -51,6 +51,10 @@ jobs:
       - name: Build Release Binary
         run: cargo build --workspace --release --all-features --locked
 
+      - name: Verify executable icon and version information
+        shell: pwsh
+        run: ./scripts/check-exe-resources.ps1 target/release/auralis.exe
+
       - name: Package Windows Artifact
         shell: pwsh
         run: |

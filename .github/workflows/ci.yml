@@ -97,6 +97,10 @@ jobs:
       - name: Release Build
         run: cargo build --workspace --release --all-features --locked
 
+      - name: Verify executable icon and version information
+        shell: pwsh
+        run: ./scripts/check-exe-resources.ps1 target/release/auralis.exe
+
   macos-build-and-test:
     name: macOS Native Verification
     runs-on: macos-latest

@@ -93,7 +93,19 @@ fn print_help() {
     );
 }
 
+/// Start the diagnostics log for long-running commands. One-shot CLI commands print to the
+/// terminal instead and do not write a log.
+fn start_diagnostics(command: &str) {
+    auralis::diagnostics::init();
+    auralis::diagnostics::info(&format!(
+        "Auralis {} starting ({command}) on {}",
+        auralis::version_label(),
+        PlatformCapabilities::detect().os_name
+    ));
+}
+
 fn run_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> ExitCode {
+    start_diagnostics("gui");
     #[cfg(target_os = "windows")]
     {
         match auralis::platform::windows_gui::run_windows_gui(initial_video, start_minimized) {
@@ -140,6 +152,10 @@ fn run_status() -> ExitCode {
         eprintln!("Warning: {w}");
     }
     println!("Configuration File:        {}", config_path.display());
+    println!(
+        "Diagnostics Log:           {}",
+        auralis::diagnostics::default_log_path().display()
+    );
 
     let adapter = create_platform_adapter();
 
@@ -338,6 +354,7 @@ fn run_apply(path: PathBuf, target_display: Option<&str>) -> ExitCode {
 }
 
 fn run_play_for_duration(path: PathBuf, seconds: u64) -> ExitCode {
+    start_diagnostics("play");
     let config_path = AppConfig::default_config_path();
     let (mut config, warning) = AppConfig::load_or_recover(&config_path);
     if let Some(w) = warning {
