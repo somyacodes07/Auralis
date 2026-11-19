@@ -2,7 +2,7 @@
 
 use auralis::{
     create_platform_adapter, validate_media_file, AppConfig, DisplayWallpaperConfig,
-    PlatformCapabilities, PowerStatus, WallpaperEngine, VERSION,
+    PlatformCapabilities, PowerStatus, WallpaperEngine,
 };
 use std::env;
 use std::path::PathBuf;
@@ -74,9 +74,12 @@ fn main() -> ExitCode {
 }
 
 fn print_help() {
-    println!("Auralis Live Wallpaper Engine v{VERSION}");
+    println!(
+        "Auralis Live Wallpaper Engine v{}",
+        auralis::version_label()
+    );
     println!("\nUsage:");
-    println!("  auralis [gui] [file] [--minimized]   Launch Auralis Configuration Studio UI");
+    println!("  auralis [gui] [file] [--minimized]   Launch the Auralis desktop app");
     println!(
         "  auralis status                       Show system, display, power, and resource status"
     );
@@ -86,7 +89,7 @@ fn print_help() {
         "  auralis play <file> [seconds]        Play a live video wallpaper for N seconds and exit"
     );
     println!(
-        "  auralis verify-desktop               Verify native desktop WorkerW window layering"
+        "  auralis verify-desktop               Check native wallpaper host creation and cleanup"
     );
 }
 
@@ -101,7 +104,17 @@ fn run_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> ExitCode {
             }
         }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        match auralis::platform::macos::run_macos_gui(initial_video, start_minimized) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("Error running Auralis menu bar app: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = (initial_video, start_minimized);
         run_status()
@@ -111,7 +124,10 @@ fn run_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> ExitCode {
 fn run_status() -> ExitCode {
     let caps = PlatformCapabilities::detect();
     println!("===============================================");
-    println!("  Auralis Live Wallpaper Engine v{VERSION}");
+    println!(
+        "  Auralis Live Wallpaper Engine v{}",
+        auralis::version_label()
+    );
     println!("===============================================");
     println!("Platform:                  {}", caps.os_name);
     println!("Desktop Layering Native:   {}", caps.wallpaper_layering);
@@ -306,8 +322,13 @@ fn run_apply(path: PathBuf, target_display: Option<&str>) -> ExitCode {
             display_id
         );
     } else {
+        let reload_note = if cfg!(target_os = "macos") {
+            "a running macOS menu-bar session does not hot-reload CLI changes; use its menu or restart it"
+        } else {
+            "no resident renderer was notified; launch the desktop app to start playback"
+        };
         println!(
-            "[CONFIGURED] Wallpaper '{}' validated and saved for display [{}] in {} (no resident renderer running; run 'auralis gui' or 'auralis play' to start playback).",
+            "[CONFIGURED] Wallpaper '{}' validated and saved for display [{}] in {} ({reload_note}).",
             path.display(),
             display_id,
             config_path.display()
@@ -343,13 +364,13 @@ fn run_play_for_duration(path: PathBuf, seconds: u64) -> ExitCode {
         .unwrap_or_else(|| "DISPLAY1".to_string());
 
     if let Err(e) = engine.apply_wallpaper(&display_id, path.clone()) {
-        eprintln!("[ERROR] Failed to start hardware video playback: {e}");
+        eprintln!("[ERROR] Failed to start native video playback: {e}");
         return ExitCode::FAILURE;
     }
 
     let hwnd = engine.host_window(&display_id).unwrap_or(0);
     println!(
-        "[PLAYING] Hardware-decoded video '{}' rendering on [{}] (WorkerW HWND 0x{hwnd:X}) for {seconds}s...",
+        "[STARTING] Native video '{}' on [{}] (host handle 0x{hwnd:X}) for {seconds}s...",
         path.display(),
         display_id
     );
@@ -369,7 +390,13 @@ fn run_play_for_duration(path: PathBuf, seconds: u64) -> ExitCode {
                 DispatchMessageW(&msg);
             }
         }
-        let _ = engine.tick();
+        #[cfg(target_os = "macos")]
+        auralis::platform::macos::pump_native_events();
+        if let Err(error) = engine.tick() {
+            eprintln!("[ERROR] Native playback failed: {error}");
+            engine.shutdown();
+            return ExitCode::FAILURE;
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
 
@@ -383,7 +410,7 @@ fn run_play_for_duration(path: PathBuf, seconds: u64) -> ExitCode {
     }
 
     engine.shutdown();
-    println!("[DONE] Playback completed and WorkerW host window cleanly destroyed.");
+    println!("[DONE] Playback completed and native host window cleanly destroyed.");
     ExitCode::SUCCESS
 }
 
@@ -407,15 +434,13 @@ fn run_verify_desktop() -> ExitCode {
     };
 
     println!(
-        "Verifying native desktop layering on [{}] ({}x{} at {}, {})...",
+        "Verifying native desktop host creation on [{}] ({}x{} at {}, {})...",
         primary.id, primary.width, primary.height, primary.left, primary.top
     );
 
     match adapter.create_wallpaper_host_window(primary) {
         Ok(hwnd) => {
-            println!(
-                "[PASS] Created and layered native host window (HWND: 0x{hwnd:X}) behind desktop icons."
-            );
+            println!("[PASS] Created native wallpaper host window (handle: 0x{hwnd:X}).");
             if let Err(e) = adapter.destroy_wallpaper_host_window(hwnd) {
                 eprintln!("[FAIL] Failed to clean up host window: {e}");
                 return ExitCode::FAILURE;

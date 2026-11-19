@@ -1,40 +1,41 @@
 # Auralis
 
-A premium, Rust-first live wallpaper application targeting **Windows** and **macOS**.
+![Auralis live wallpaper](assets/auralis-logo.svg)
+
+A Rust-first live wallpaper application for **Windows** and **macOS**, built around native video playback and a quiet monochrome desktop experience.
 
 ## Features (`v0.2.0-beta.1`)
 
-- **Native Hardware-Decoded Video Wallpapers (Windows)**: Renders `.mp4`, `.mov`, `.mkv`, `.webm`, and `.m4v` videos directly behind desktop icons (`Progman`/`WorkerW`) using Windows Media Foundation (`mfplay.dll` / `IMFPMediaPlayer`) with Per-Monitor V2 physical DPI scaling and pre-EOS seamless loop seeking.
+- **Native Video Wallpapers**: Windows uses Media Foundation (`mfplay.dll` / `IMFPMediaPlayer`) and `Progman`/`WorkerW` desktop layering. macOS uses AVFoundation (`AVPlayer` / `AVPlayerLayer`) and an AppKit desktop host. The macOS native integration compiles in CI; desktop layering and playback still need interactive acceptance testing on supported Macs.
 - **Memory-conscious playback flow**: Auralis stops its preview decoder before applying a wallpaper, avoiding two simultaneous video decoders. Playback keeps the source resolution and uses the platform video path; resource use depends on the selected video and hardware. The Studio reports process Working Set and Private Bytes separately, since trimming resident pages does not reduce committed private memory.
 - **Live Playback Speed, Aspect Scaling & Recent Wallpapers**: Adjust playback speed (`0.25x` – `2.00x`), toggle aspect scaling between **Fill (Full Screen)** and **Fit (Letterbox)**, and cycle through up to 10 recent wallpapers from the Studio UI or System Tray menu.
-- **Monochrome Configuration Studio UI & In-App Video Preview**: Launch `auralis.exe` (or `cargo run`) to open the native Windows Studio with an embedded video preview, drag-and-drop file loading, monitor selection, playback/audio/loop/speed/scale controls, and live Working Set, Private Bytes, and CPU telemetry. Its SVG wordmark and grayscale live indicator match the refreshed interface; a saved Reduce Motion preference also honors Windows accessibility settings.
-- **Windows System Tray & Login Startup Integration**: Minimizes to the Windows System Tray (`Shell_NotifyIconW`) with a right-click quick-control menu (`Open`, `Next Recent Wallpaper`, `Pause / Resume`, `Mute / Unmute`, `Stop`, `Quit`) and optional login startup registration (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
+- **Windows Configuration Studio**: Launch `auralis.exe` (or `cargo run`) for an embedded video preview, drag-and-drop file loading, display selection, playback/audio/loop/speed/scale controls, and live process telemetry. Its grayscale live indicator honors the saved Reduce Motion setting and Windows animation accessibility preference.
+- **Windows System Tray & Login Startup Integration**: Minimizes to the Windows System Tray (`Shell_NotifyIconW`) with the custom A/wave icon and quick-control menu (`Open`, `Next Recent Wallpaper`, `Pause / Resume`, `Mute / Unmute`, `Stop`, `Quit`) and optional login startup registration.
+- **macOS Menu Bar Controls**: Runs as a menu-bar app with a matching monochrome mark, native file picker, recent-wallpaper cycling, pause/resume, mute, stop, a Launch at Login toggle, display-change handling, and sleep/wake handling. A full macOS configuration window and preview are not included yet.
 - **Resilient Runtime**: Closing or minimizing the configuration window keeps your live wallpaper playing in the background. Failed media replacements automatically preserve your previous working wallpaper, and corrupt config files are safely backed up to `.corrupt.bak`.
 - **Smart Power, Sleep/Wake & Full-Screen Policies**: Automatically pauses video playback when a full-screen application/game occludes the monitor, when the system enters sleep (`WM_POWERBROADCAST`), or when running on battery power.
-- **Multi-Agent Engineering**: Built collaboratively with **Antigravity** (primary implementation agent) and **Freebuff** (independent verification agent via [`knowledge.md`](knowledge.md)).
 
 ## Platform support
 
 | Platform | Current support |
 | --- | --- |
 | Windows x64 | Native Studio UI, desktop wallpaper layering, hardware video playback, tray controls, and startup integration are implemented. CI builds and tests on Windows; desktop layering and playback still need manual acceptance testing on each supported Windows configuration. |
-| macOS | CLI status and video-file validation only. The macOS wallpaper player and configuration UI are not implemented; `gui` currently falls back to status output. |
+| macOS | Native menu-bar app, AVFoundation video playback, multi-display host creation, LaunchAgent control, and sleep/wake/display-change handling are implemented. CI compiles and tests the native bridge; interactive desktop layering, media playback, and sleep/wake acceptance remain unverified. No macOS Studio window or preview is included. |
 
-For detailed engineering guidelines, see [AGENTS.md](AGENTS.md) and [docs/MULTI_AGENT_WORKFLOW.md](docs/MULTI_AGENT_WORKFLOW.md).
-The monochrome brand asset is [assets/auralis-logo.svg](assets/auralis-logo.svg); design and resource measurement notes are in [docs/UX_AND_PERFORMANCE.md](docs/UX_AND_PERFORMANCE.md).
+For engineering and contribution guidance, see [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [docs/PLATFORM_TEST_MATRIX.md](docs/PLATFORM_TEST_MATRIX.md). The wordmark and app mark are [assets/auralis-logo.svg](assets/auralis-logo.svg) and [assets/auralis-mark.svg](assets/auralis-mark.svg); design and resource measurement notes are in [docs/UX_AND_PERFORMANCE.md](docs/UX_AND_PERFORMANCE.md).
 
 ## Usage & CLI Commands
 
 ```powershell
-# Launch the interactive Auralis Configuration Studio UI (default when double-clicking auralis.exe)
+# Launch the Auralis desktop app (Windows Studio or macOS menu bar app)
 cargo run --release
-# or launch directly minimized in the Windows System Tray:
+# Launch the Windows Studio minimized to the system tray:
 .\target\release\auralis.exe gui --minimized
 
 # Play a live video wallpaper behind desktop icons for N seconds from the CLI
 .\target\release\auralis.exe play path\to\video.mp4 15
 
-# Configure a wallpaper for a display (and reload the active Studio session if running)
+# Configure a wallpaper for a display (a running Windows Studio session reloads it live)
 .\target\release\auralis.exe apply path\to\video.mp4 [DISPLAY1]
 
 # Inspect platform capabilities, power status, measured Working Set/Private RAM, and connected displays
@@ -43,7 +44,7 @@ cargo run --release
 # Validate a video file for wallpaper compatibility
 .\target\release\auralis.exe validate path\to\video.mp4
 
-# Verify native desktop WorkerW window creation and cleanup behind desktop icons
+# Verify native wallpaper host creation and cleanup (not visual layering)
 .\target\release\auralis.exe verify-desktop
 ```
 
@@ -63,14 +64,17 @@ bash scripts/verify.sh
 
 These scripts verify:
 1. Formatting: `cargo fmt --all -- --check`
-2. Static Analysis: `cargo clippy --workspace --all-targets -- -D warnings`
-3. Test Suite: `cargo test --workspace`
-4. Release Compilation: `cargo build --workspace --release`
+2. Static Analysis: `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+3. Test Suite: `cargo test --workspace --all-features --locked`
+4. Release Compilation: `cargo build --workspace --release --all-features --locked`
 5. Patch Hygiene: `git diff --check`
 
-## Publishing a Release & Triggering Auto-Build CI/CD
+## CI/CD and release artifacts
 
-Releases are tag-driven via [`.github/workflows/release.yml`](.github/workflows/release.yml). The workflow accepts `v*` tags, then verifies SemVer syntax, exact equality with `Cargo.toml`, and that the tagged commit is reachable from the default branch. It runs formatting, Clippy, tests, and a release build on Windows and macOS. The resulting release remains a draft:
+Every merge to `main` is built on native Windows and macOS runners and published as a numbered **prerelease** on the [Releases page](https://github.com/somyacodes07/Auralis/releases), tagged like `v0.2.0-beta.1+build.42`. The build number is shown in the Studio title bar and in `auralis status`. These are unsigned test builds; see [docs/CI_CD_SETUP.md](docs/CI_CD_SETUP.md).
+
+
+Pull requests to `main` run formatting and patch-hygiene checks plus native Windows and macOS Clippy, tests, and release builds. Releases are tag-driven via [`.github/workflows/release.yml`](.github/workflows/release.yml). The workflow checks SemVer, exact equality with `Cargo.toml`, and reachability from the default branch. It builds a Windows ZIP and a single-architecture macOS app bundle and CLI archive. The draft release remains unsigned and must be reviewed and manually published after native acceptance testing:
 
 1. Push the committed source to the default branch, then push its matching annotated SemVer tag (e.g., `v0.2.0-beta.1`):
    ```powershell
@@ -78,4 +82,8 @@ Releases are tag-driven via [`.github/workflows/release.yml`](.github/workflows/
    git tag -a v0.2.0-beta.1 -m "Auralis v0.2.0-beta.1 Beta Release"
    git push origin v0.2.0-beta.1
    ```
-2. GitHub Actions creates a **draft** release with `auralis-v<version>-windows-x86_64.zip` and `auralis-v<version>-macos-<arch>.tar.gz` plus SHA-256 checksum files. The macOS binary is a single-architecture CLI artifact, not a universal app or a wallpaper app. Review and publish the draft manually only after platform acceptance testing.
+2. GitHub Actions creates a **draft** release with Windows and macOS artifacts plus SHA-256 checksums. The macOS `.app` is single-architecture, unsigned, and not notarized. Review and publish the draft manually only after platform acceptance testing.
+
+## License
+
+Auralis is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the locked dependency license inventory.

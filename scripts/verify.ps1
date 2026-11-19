@@ -36,9 +36,9 @@ try {
 }
 
 # 3. Static Analysis / Clippy
-Write-Host "`n[Gate 2/5] Running Clippy (cargo clippy --workspace --all-targets -- -D warnings)..." -ForegroundColor Yellow
+Write-Host "`n[Gate 2/5] Running Clippy (cargo clippy --workspace --all-targets --all-features --locked -- -D warnings)..." -ForegroundColor Yellow
 try {
-    & cargo clippy --workspace --all-targets -- -D warnings
+    & cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
     if ($LASTEXITCODE -ne 0) { $FailedGates += "Clippy (cargo clippy)" }
     else { Write-Host "[PASS] Clippy analysis passed." -ForegroundColor Green }
 } catch {
@@ -46,9 +46,9 @@ try {
 }
 
 # 4. Unit & Integration Tests
-Write-Host "`n[Gate 3/5] Running Tests (cargo test --workspace)..." -ForegroundColor Yellow
+Write-Host "`n[Gate 3/5] Running Tests (cargo test --workspace --all-features --locked)..." -ForegroundColor Yellow
 try {
-    & cargo test --workspace
+    & cargo test --workspace --all-features --locked
     if ($LASTEXITCODE -ne 0) { $FailedGates += "Tests (cargo test)" }
     else { Write-Host "[PASS] Test suite passed." -ForegroundColor Green }
 } catch {
@@ -56,9 +56,9 @@ try {
 }
 
 # 5. Release Compilation
-Write-Host "`n[Gate 4/5] Building Release Target (cargo build --workspace --release)..." -ForegroundColor Yellow
+Write-Host "`n[Gate 4/5] Building Release Target (cargo build --workspace --release --all-features --locked)..." -ForegroundColor Yellow
 try {
-    & cargo build --workspace --release
+    & cargo build --workspace --release --all-features --locked
     if ($LASTEXITCODE -ne 0) { $FailedGates += "Release Build (cargo build --release)" }
     else { Write-Host "[PASS] Release compilation passed." -ForegroundColor Green }
 } catch {

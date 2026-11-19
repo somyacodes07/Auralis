@@ -25,24 +25,24 @@ else
 fi
 
 echo ""
-echo "[Gate 2/5] Running Clippy (cargo clippy --workspace --all-targets -- -D warnings)..."
-if ! cargo clippy --workspace --all-targets -- -D warnings; then
+echo "[Gate 2/5] Running Clippy (cargo clippy --workspace --all-targets --all-features --locked -- -D warnings)..."
+if ! cargo clippy --workspace --all-targets --all-features --locked -- -D warnings; then
     FAILED_GATES+=("Clippy")
 else
     echo "[PASS] Clippy analysis passed."
 fi
 
 echo ""
-echo "[Gate 3/5] Running Tests (cargo test --workspace)..."
-if ! cargo test --workspace; then
+echo "[Gate 3/5] Running Tests (cargo test --workspace --all-features --locked)..."
+if ! cargo test --workspace --all-features --locked; then
     FAILED_GATES+=("Tests")
 else
     echo "[PASS] Test suite passed."
 fi
 
 echo ""
-echo "[Gate 4/5] Building Release Target (cargo build --workspace --release)..."
-if ! cargo build --workspace --release; then
+echo "[Gate 4/5] Building Release Target (cargo build --workspace --release --all-features --locked)..."
+if ! cargo build --workspace --release --all-features --locked; then
     FAILED_GATES+=("Release Build")
 else
     echo "[PASS] Release compilation passed."

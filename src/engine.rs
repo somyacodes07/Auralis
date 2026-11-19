@@ -465,17 +465,35 @@ impl WallpaperEngine {
     pub fn tick(&mut self) -> Result<(), PlatformError> {
         self.evaluate_policy()?;
 
+        let mut playback_failure = None;
         for (id, controller) in &self.controllers {
             if matches!(
                 controller.state,
                 crate::media::PlaybackState::Playing { .. }
             ) {
                 if let Some(&hwnd) = self.host_windows.get(id) {
-                    let _ = self
+                    if let Err(error) = self
                         .adapter
-                        .tick_video_playback(hwnd, controller.loop_playback);
+                        .tick_video_playback(hwnd, controller.loop_playback)
+                    {
+                        let path = match &controller.state {
+                            crate::media::PlaybackState::Playing { path, .. } => path.clone(),
+                            _ => continue,
+                        };
+                        playback_failure = Some((id.clone(), path, error));
+                        break;
+                    }
                 }
             }
+        }
+        if let Some((id, path, error)) = playback_failure {
+            if let Some(controller) = self.controllers.get_mut(&id) {
+                controller.state = crate::media::PlaybackState::Failed {
+                    path,
+                    error: error.to_string(),
+                };
+            }
+            return Err(error);
         }
         Ok(())
     }
@@ -605,6 +623,7 @@ mod tests {
     struct MockPlatformAdapter {
         on_battery: Arc<AtomicBool>,
         occluded: Arc<AtomicBool>,
+        fail_playback_tick: bool,
         created_windows: Arc<AtomicUsize>,
         destroyed_windows: Arc<AtomicUsize>,
     }
@@ -679,6 +698,20 @@ mod tests {
         ) -> Result<(), PlatformError> {
             Ok(())
         }
+
+        fn tick_video_playback(
+            &mut self,
+            _window_hwnd: isize,
+            _loop_playback: bool,
+        ) -> Result<(), PlatformError> {
+            if self.fail_playback_tick {
+                Err(PlatformError::MediaPlaybackFailed(
+                    "mock decode failure".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
     }
 
     fn create_temp_video(name: &str) -> PathBuf {
@@ -698,6 +731,7 @@ mod tests {
         let adapter = Box::new(MockPlatformAdapter {
             on_battery,
             occluded,
+            fail_playback_tick: false,
             created_windows: created.clone(),
             destroyed_windows: destroyed.clone(),
         });
@@ -727,6 +761,35 @@ mod tests {
     }
 
     #[test]
+    fn native_playback_tick_failure_is_reported_and_stored_in_controller_state() {
+        let mut engine = WallpaperEngine::new(
+            AppConfig::default(),
+            Box::new(MockPlatformAdapter {
+                on_battery: Arc::new(AtomicBool::new(false)),
+                occluded: Arc::new(AtomicBool::new(false)),
+                fail_playback_tick: true,
+                created_windows: Arc::new(AtomicUsize::new(0)),
+                destroyed_windows: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .unwrap();
+        let video = create_temp_video("engine_native_tick_failure.mp4");
+        engine.apply_wallpaper("DISPLAY_1", video.clone()).unwrap();
+
+        assert!(matches!(
+            engine.tick(),
+            Err(PlatformError::MediaPlaybackFailed(message)) if message == "mock decode failure"
+        ));
+        assert!(matches!(
+            engine.controller("DISPLAY_1").unwrap().state,
+            PlaybackState::Failed { .. }
+        ));
+
+        engine.shutdown();
+        let _ = std::fs::remove_file(video);
+    }
+
+    #[test]
     fn test_engine_sleep_wake_and_battery_policies() {
         let on_battery = Arc::new(AtomicBool::new(false));
         let occluded = Arc::new(AtomicBool::new(false));
@@ -736,6 +799,7 @@ mod tests {
         let adapter = Box::new(MockPlatformAdapter {
             on_battery: on_battery.clone(),
             occluded: occluded.clone(),
+            fail_playback_tick: false,
             created_windows: created,
             destroyed_windows: destroyed,
         });
@@ -803,6 +867,7 @@ mod tests {
         let adapter = Box::new(MockPlatformAdapter {
             on_battery,
             occluded,
+            fail_playback_tick: false,
             created_windows: created,
             destroyed_windows: destroyed.clone(),
         });
@@ -853,6 +918,7 @@ mod tests {
         let adapter = Box::new(MockPlatformAdapter {
             on_battery,
             occluded,
+            fail_playback_tick: false,
             created_windows: created,
             destroyed_windows: destroyed,
         });

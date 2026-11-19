@@ -4,7 +4,9 @@
 
 Auralis keeps the main workflow short: choose a display, open or drop a local video, preview it, then apply it. Recent wallpapers and the system tray make repeated use quick; loop, mute, volume, speed, aspect, full-screen pause, and battery pause remain close to the active wallpaper controls.
 
-The refreshed Windows Studio uses a restrained grayscale palette, larger action targets, grouped cards, a live preview, and a small playback indicator. The idle preview shows a static play mark and keeps its decoder stopped until the user requests playback. The playback indicator animates only while playback is active. **Reduce motion** persists in the configuration and disables that animation; Windows' client-animation accessibility setting also disables it. The animation does not touch or re-render wallpaper frames.
+The refreshed Windows Studio uses a restrained grayscale palette, larger action targets, grouped cards, a live preview, and a small playback indicator. The idle preview shows a static play mark and keeps its decoder stopped until the user requests playback. The playback indicator animates only while playback is active. **Reduce motion** persists in the configuration and disables that animation; Windows' client-animation accessibility setting also disables it. The animation does not touch or re-render wallpaper frames. The Windows title bar and tray share the monochrome A/wave brand mark. Layout uses a 96-DPI logical grid (8px rhythm, 24px outer gutter, 16px between cards) scaled by the monitor DPI; the frame is sized with `AdjustWindowRectEx` and centered in the primary monitor's work area. Text uses Segoe UI at two weights (regular and semibold); field labels, hints, and telemetry use a secondary gray tone.
+
+On macOS, the app currently lives in the menu bar and uses the native file picker and AVFoundation playback controls. It supports selecting the primary display, recent cycling, pause/resume, mute, stop, Launch at Login, display-change notifications, and sleep/wake notifications. The richer Windows Studio and embedded preview are not available on macOS yet. The same A/wave mark is drawn as an AppKit template image for the system menu bar.
 
 Context labels and dividers group the controls, and hover feedback makes the custom actions easier to scan. Preview and apply actions stay disabled until a video path is entered; wallpaper playback and tuning controls stay disabled until a display has an active wallpaper. This keeps first-run actions clear and avoids controls that can only do nothing.
 
@@ -17,6 +19,7 @@ Lively Wallpaper is a useful workflow reference for drag-and-drop import, a rece
 - Full-screen and battery pause policies stop playback when configured. The wallpaper is also paused during sleep and resumed after wake.
 - The process telemetry reports Working Set (resident physical pages), Private Bytes (committed private memory), peak Working Set, and CPU time. These values do not include dedicated GPU memory and should not be conflated: `K32EmptyWorkingSet` can trim resident pages without reducing Private Bytes.
 - Hardware decoding depends on the codec, profile, driver, and device. The application currently has no user-facing decoder or quality preset and does not claim that every supported file is hardware-decoded.
+- macOS uses AVPlayer/AVPlayerLayer and leaves format decoding to AVFoundation. It does not yet expose measured process or GPU metrics in the menu-bar UI. No cross-platform low-memory or competitor-performance claim is made.
 
 ## Playback backend follow-up
 
@@ -32,4 +35,4 @@ For a repeatable Windows comparison, record the Windows build, GPU and driver, p
 4. In Task Manager, check the process GPU engine for Video Decode and note dedicated/shared GPU memory separately. Watch for dropped frames, visible scaling artifacts, and correct pause/resume behavior.
 5. Repeat on battery and in a full-screen application with each pause option enabled.
 
-Do not compare a trimmed Working Set alone or claim an advantage over another wallpaper app without matching the video, display, hardware, power state, observation interval, and measurement method. Windows desktop layering and media behavior still require manual acceptance tests on supported Windows configurations. macOS currently provides CLI diagnostics and validation only; the native wallpaper host and Studio are not implemented.
+Do not compare a trimmed Working Set alone or claim an advantage over another wallpaper app without matching the video, display, hardware, power state, observation interval, and measurement method. Windows desktop layering and media behavior still require manual acceptance tests on supported Windows configurations. The macOS native bridge compiles in CI, but interactive layering, playback, and lifecycle behavior still need acceptance testing on a real Mac. A full macOS Studio and preview remain future work.

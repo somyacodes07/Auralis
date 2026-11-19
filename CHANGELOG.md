@@ -6,13 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Added
-- Added the Auralis SVG wordmark, live preview empty state, and a saved Reduce Motion option that follows Windows client-animation accessibility settings.
+- Every merge to `main` is now built on Windows and macOS and published as a numbered GitHub prerelease tagged `v<version>+build.<N>`. The build number appears in the Studio title, tray tooltip, `auralis status`, and the macOS bundle version.
+- Added a matching monochrome Auralis wordmark and square mark, plus an app-owned Windows icon for the Studio and system tray.
+- Added a macOS menu-bar app backed by AppKit and AVFoundation, including wallpaper selection, playback/audio controls, recent cycling, Launch at Login, display changes, and sleep/wake handling.
+- Added an unsigned `.app` bundle to macOS tag-release artifacts.
+- Added MIT and Apache-2.0 license texts, a dependency license inventory, contribution/security guidance, and a native platform acceptance matrix.
+
+### Fixed
+- Fixed the `&` in "Quit & restore desktop" rendering as an underline mnemonic and the header live label being clipped.
+- The Windows Studio now closes the stray console window Windows opens when `auralis.exe` is launched from Explorer, the Start menu, or the sign-in entry. Selecting text in that console could suspend log output and stall the Studio. CLI commands run from a terminal still print normally.
 
 ### Changed
 - Redesigned the Windows Studio as a monochrome, card-based layout with custom native controls and a subtle grayscale playback indicator.
 - Reorganized the wallpaper, preview, playback, behavior, and resource telemetry panels and clarified first-run guidance.
 - Added restrained panel context labels, dividers, hover feedback, and state-based action availability so unavailable controls remain disabled until a source or wallpaper is ready.
+- Tightened the Windows Studio layout onto a consistent spacing grid, sized the window from its client area, and centered it inside the monitor work area so it no longer extends under the taskbar on 1080p displays at 125% scaling.
+- Replaced all-caps panel captions with sentence-case headings and secondary-tone field labels, limited type to regular and semibold weights, and showed the live display name in the header.
+- Replaced dotted focus rectangles with solid focus rings and painted compact minus/plus glyphs on volume and speed step buttons while keeping descriptive accessible names.
+- Display selector entries now read like `DISPLAY1, 1920 × 1080, primary`, and the video path field scrolls to show the file name.
 - Replaced unmeasured low-memory wording with separate Working Set and Private Bytes explanations and a repeatable resource measurement guide.
+- Kept the previous macOS video visible until AVFoundation reports the replacement item ready to play.
+- Propagated native playback tick failures into recoverable engine state and surfaced the error once instead of silently ignoring it.
+- Updated platform documentation and runtime capability reporting for the implemented macOS native host while leaving hardware-decoding claims disabled.
 
 ## [0.2.0-beta.1] - 2026-10-13
 
@@ -64,5 +79,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - Local 5-gate verification scripts (`scripts/verify.ps1`, `scripts/verify.sh`), GitHub Actions CI matrix (`.github/workflows/ci.yml`), tag-driven draft release workflow (`.github/workflows/release.yml`), and multi-agent engineering workflow with **Antigravity** and **Freebuff** (`knowledge.md`, `docs/MULTI_AGENT_WORKFLOW.md`).
 
 ### Known Limitations
-- Windows native desktop layering (`WorkerW`), hardware video playback (`mfplay.dll`), Per-Monitor V2 full-screen scaling, In-App Video Preview, System Tray integration, and the Win32 Configuration Studio UI are implemented and verified end-to-end on Windows.
-- macOS native `AVFoundation`/`NSWindow` desktop wallpaper layering is not yet implemented (`PlatformCapabilities::detect()` reports `false` on macOS until the native adapter is added in the next milestone).
+- macOS visual desktop layering, playback, display/sleep lifecycle, and startup behavior still need manual acceptance testing on an interactive Mac; CI compilation does not verify them.
+- macOS does not yet provide the Windows Studio window, embedded preview, process/GPU telemetry, or a universal/signed/notarized installer.
+- Windows native layering and playback also require manual acceptance on supported Windows configurations; CI compilation is not proof of visual desktop behavior.
