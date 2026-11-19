@@ -7,8 +7,10 @@ use crate::config::VideoAspectMode;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub mod lock_screen;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod macos_studio;
 #[cfg(target_os = "windows")]
 pub mod windows;
 #[cfg(target_os = "windows")]
@@ -163,6 +165,15 @@ pub trait PlatformAdapter: Send + Sync {
 
     /// Cleanly detach and destroy a previously created native wallpaper host window.
     fn destroy_wallpaper_host_window(&mut self, window_hwnd: isize) -> Result<(), PlatformError>;
+
+    /// Report whether a wallpaper host window still exists and is still layered inside the
+    /// current desktop shell. Returns `false` once the shell has been restarted underneath it
+    /// (for example after Windows Explorer restarts). Adapters that cannot lose their host
+    /// keep the default `true`; when the shell is not available yet, return `true` only if
+    /// the window itself is still alive.
+    fn is_wallpaper_host_attached(&mut self, _window_hwnd: isize) -> bool {
+        true
+    }
 
     /// Attach an existing native window handle behind desktop icons for the specified display.
     fn attach_to_desktop(

@@ -1,0 +1,44 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# Run locally with `cargo deny check`. CI runs the same check in the
+# "Supply Chain (cargo-deny)" job of .github/workflows/ci.yml.
+
+[graph]
+# Check every platform Auralis ships for, so Windows-only and macOS-only crates are included.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+# RustSec advisory database. Vulnerability, unsound, and unmaintained advisories fail the
+# check, as do yanked crate versions.
+yanked = "deny"
+# Accepted advisories go here with a reason, for example:
+# { id = "RUSTSEC-0000-0000", reason = "not reachable from Auralis because ..." },
+ignore = []
+
+[licenses]
+# Auralis is distributed under MIT OR Apache-2.0. Only permissive licenses compatible with
+# shipping binaries under those terms are allowed; anything else needs review first.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicate crate versions are reported but do not fail the check.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# crates.io only. Git or alternative registry sources must be reviewed and listed here.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -55,6 +55,7 @@ fn main() -> ExitCode {
             }
         }
         "verify-desktop" => run_verify_desktop(),
+        "quit" => run_quit(),
         "--help" | "-h" | "help" => {
             print_help();
             ExitCode::SUCCESS
@@ -74,10 +75,7 @@ fn main() -> ExitCode {
 }
 
 fn print_help() {
-    println!(
-        "Auralis Live Wallpaper Engine v{}",
-        auralis::version_label()
-    );
+    println!("Auralis v{}", auralis::version_label());
     println!("\nUsage:");
     println!("  auralis [gui] [file] [--minimized]   Launch the Auralis desktop app");
     println!(
@@ -91,15 +89,62 @@ fn print_help() {
     println!(
         "  auralis verify-desktop               Check native wallpaper host creation and cleanup"
     );
+    println!(
+        "  auralis quit                         Quit the running app and restore the desktop (Windows)"
+    );
+}
+
+/// Ask a running Studio to quit and restore the desktop; used by installers and uninstallers.
+/// Exits 0 when no instance runs or it quit, non-zero if it was still running after 5 seconds.
+fn run_quit() -> ExitCode {
+    #[cfg(target_os = "windows")]
+    {
+        use auralis::platform::windows_gui::{quit_running_instance, QuitOutcome};
+        match quit_running_instance(Duration::from_secs(5)) {
+            QuitOutcome::NotRunning => {
+                println!("Auralis is not running.");
+                ExitCode::SUCCESS
+            }
+            QuitOutcome::Quit => {
+                println!("Auralis quit and restored the desktop.");
+                ExitCode::SUCCESS
+            }
+            QuitOutcome::TimedOut => {
+                eprintln!(
+                    "Auralis did not quit within 5 seconds. Choose Quit from its tray icon menu, then try again."
+                );
+                ExitCode::FAILURE
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        eprintln!(
+            "auralis quit is available on Windows only. Quit Auralis from its menu bar icon."
+        );
+        ExitCode::FAILURE
+    }
+}
+
+/// Start the diagnostics log for long-running commands. One-shot CLI commands print to the
+/// terminal instead and do not write a log.
+fn start_diagnostics(command: &str) {
+    auralis::diagnostics::init();
+    auralis::diagnostics::info(&format!(
+        "Auralis {} starting ({command}) on {}",
+        auralis::version_label(),
+        PlatformCapabilities::detect().os_name
+    ));
 }
 
 fn run_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> ExitCode {
+    start_diagnostics("gui");
     #[cfg(target_os = "windows")]
     {
         match auralis::platform::windows_gui::run_windows_gui(initial_video, start_minimized) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("Error running Auralis Configuration Studio: {e}");
+                eprintln!("Error running Auralis Studio: {e}");
                 ExitCode::FAILURE
             }
         }
@@ -124,10 +169,7 @@ fn run_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> ExitCode {
 fn run_status() -> ExitCode {
     let caps = PlatformCapabilities::detect();
     println!("===============================================");
-    println!(
-        "  Auralis Live Wallpaper Engine v{}",
-        auralis::version_label()
-    );
+    println!("  Auralis v{}", auralis::version_label());
     println!("===============================================");
     println!("Platform:                  {}", caps.os_name);
     println!("Desktop Layering Native:   {}", caps.wallpaper_layering);
@@ -140,6 +182,10 @@ fn run_status() -> ExitCode {
         eprintln!("Warning: {w}");
     }
     println!("Configuration File:        {}", config_path.display());
+    println!(
+        "Diagnostics Log:           {}",
+        auralis::diagnostics::default_log_path().display()
+    );
 
     let adapter = create_platform_adapter();
 
@@ -218,7 +264,7 @@ fn run_status() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("Error initializing Auralis Wallpaper Engine: {e}");
+            eprintln!("Error initializing Auralis: {e}");
             ExitCode::FAILURE
         }
     }
@@ -338,6 +384,7 @@ fn run_apply(path: PathBuf, target_display: Option<&str>) -> ExitCode {
 }
 
 fn run_play_for_duration(path: PathBuf, seconds: u64) -> ExitCode {
+    start_diagnostics("play");
     let config_path = AppConfig::default_config_path();
     let (mut config, warning) = AppConfig::load_or_recover(&config_path);
     if let Some(w) = warning {
@@ -441,6 +488,18 @@ fn run_verify_desktop() -> ExitCode {
     match adapter.create_wallpaper_host_window(primary) {
         Ok(hwnd) => {
             println!("[PASS] Created native wallpaper host window (handle: 0x{hwnd:X}).");
+            #[cfg(target_os = "macos")]
+            {
+                // Let AppKit order the window before reporting its on-screen state.
+                for _ in 0..20 {
+                    auralis::platform::macos::pump_native_events();
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                println!(
+                    "       Host window: {}",
+                    auralis::platform::macos::describe_host_window(hwnd)
+                );
+            }
             if let Err(e) = adapter.destroy_wallpaper_host_window(hwnd) {
                 eprintln!("[FAIL] Failed to clean up host window: {e}");
                 return ExitCode::FAILURE;

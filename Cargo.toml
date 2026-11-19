@@ -32,6 +32,7 @@ features = [
     "Win32_System_Threading",
     "Win32_System_ProcessStatus",
     "Win32_System_RemoteDesktop",
+    "Win32_Security",
 ]
 
 [dev-dependencies]

@@ -9,17 +9,24 @@
 //! message-sending calls outside borrows where practical so synchronous Win32 message
 //! re-entrancy can never trigger a `RefCell` borrow panic.
 
-use super::windows::{string_from_wide, wide_string, WindowsPlatformAdapter};
+use super::windows::{
+    read_startup_command, startup_command_for, startup_command_matches, string_from_wide,
+    wide_string, WindowsPlatformAdapter,
+};
 use super::windows_player::MfVideoPlayer;
-use crate::config::{AppConfig, VideoAspectMode};
+use crate::config::{AppConfig, DisplayWallpaperConfig, VideoAspectMode};
 use crate::engine::WallpaperEngine;
 use crate::media::PlaybackState;
 use crate::platform::{create_platform_adapter, PowerStatus};
 use crate::PlatformEvent;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::mem;
-use std::path::PathBuf;
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT,
+    WAIT_OBJECT_0, WPARAM,
+};
 use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawFocusRect, DrawTextW,
@@ -30,14 +37,20 @@ use windows_sys::Win32::Graphics::Gdi::{
     FW_NORMAL, FW_SEMIBOLD, HBRUSH, HFONT, HGDIOBJ, HPEN, LOGPIXELSY, NULL_BRUSH, OUT_TT_PRECIS,
     TRANSPARENT,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows_sys::Win32::System::Threading::{
+    CreateMutexW, OpenMutexW, OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    SYNCHRONIZATION_SYNCHRONIZE,
+};
 use windows_sys::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, EM_SETSEL, MEASUREITEMSTRUCT, ODS_FOCUS, ODS_HOTLIGHT, ODS_SELECTED,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, IsWindowEnabled};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetFocus, IsWindowEnabled, SetFocus,
+};
 use windows_sys::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, RemoveWindowSubclass,
     SetWindowSubclass, Shell_NotifyIconW, HDROP, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
@@ -46,19 +59,23 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos,
-    GetMessageW, GetWindowTextLengthW, GetWindowTextW, KillTimer, LoadCursorW, LoadIconW,
-    PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowTextW,
-    ShowWindow, SystemParametersInfoW, TrackPopupMenu, TranslateMessage, BM_GETCHECK, BM_SETCHECK,
-    BS_AUTOCHECKBOX, BS_OWNERDRAW, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST, CBS_HASSTRINGS,
-    CBS_OWNERDRAWFIXED, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, IDC_ARROW, IDI_APPLICATION, MF_SEPARATOR, MF_STRING,
-    MSG, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
-    SPI_GETCLIENTAREAANIMATION, SPI_GETWORKAREA, SW_HIDE, SW_RESTORE, SW_SHOW, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_RETURNCMD, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
-    WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_DRAWITEM, WM_DROPFILES, WM_ERASEBKGND, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MEASUREITEM,
-    WM_NCDESTROY, WM_PAINT, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETFONT, WM_TIMER, WNDCLASSW,
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TRANSPARENT,
+    GetDlgCtrlID, GetMessageW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsChild, IsDialogMessageW, IsWindow, KillTimer, LoadCursorW,
+    LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SendMessageW,
+    SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, SystemParametersInfoW,
+    TrackPopupMenu, TranslateMessage, BM_CLICK, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX,
+    BS_OWNERDRAW, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST, CBS_HASSTRINGS,
+    CBS_OWNERDRAWFIXED, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
+    CB_SETITEMHEIGHT, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, IDC_ARROW,
+    IDI_APPLICATION, IDOK, MF_SEPARATOR, MF_STRING, MSG, PBT_APMPOWERSTATUSCHANGE,
+    PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, SPI_GETCLIENTAREAANIMATION,
+    SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TPM_RETURNCMD, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DRAWITEM, WM_DROPFILES, WM_ENDSESSION, WM_ERASEBKGND,
+    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MEASUREITEM, WM_NCDESTROY, WM_PAINT, WM_POWERBROADCAST,
+    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_TRANSPARENT,
     WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
@@ -72,7 +89,16 @@ const WM_AURALIS_TRAY_ICON: u32 = WM_APP + 3;
 /// `SS_NOPREFIX` prevents `STATIC` controls from interpreting `&` as an underline accelerator.
 const SS_NOPREFIX: u32 = 0x0080;
 const SS_CENTER: u32 = 0x0001;
+/// `SS_ENDELLIPSIS` truncates long `STATIC` text with an ellipsis instead of clipping it.
+const SS_ENDELLIPSIS: u32 = 0x4000;
 const EN_CHANGE: usize = 0x0300;
+
+/// Session-local name of the mutex that keeps one Studio per signed-in user.
+const SINGLE_INSTANCE_MUTEX_NAME: &str = r"Local\AuralisStudio";
+/// How long a second launch waits for the first instance's window to appear.
+const EXISTING_WINDOW_WAIT: Duration = Duration::from_secs(3);
+/// Timer ticks between checks that the wallpaper hosts are still inside the desktop shell.
+const HOST_CHECK_TICKS: u32 = 20;
 
 const ID_CMB_DISPLAY: usize = 100;
 const ID_EDT_PATH: usize = 101;
@@ -127,6 +153,10 @@ const fn is_checkbox_control_id(control_id: usize) -> bool {
 struct GuiState {
     engine: WallpaperEngine,
     config_path: PathBuf,
+    /// DPI the fonts and child layout are currently built for.
+    dpi: u32,
+    /// Every child control with the layout entry it was created from.
+    controls: Vec<(HWND, &'static ControlSpec)>,
     ui_font: HFONT,
     section_font: HFONT,
     heading_font: HFONT,
@@ -161,12 +191,16 @@ struct GuiState {
     preview_path: Option<PathBuf>,
     lbl_status: HWND,
     lbl_status_details: HWND,
+    /// "On this display" readout: file name and resolution/state lines.
+    lbl_now_file: HWND,
+    lbl_now_meta: HWND,
     /// Static labels painted in the secondary text color (field labels, hints, details).
     secondary_labels: Vec<HWND>,
     last_error: Option<String>,
     last_status_text: String,
     tray_added: bool,
     brand_icon: windows_sys::Win32::UI::WindowsAndMessaging::HICON,
+    brand_icon_large: windows_sys::Win32::UI::WindowsAndMessaging::HICON,
     tick_counter: u32,
 }
 
@@ -192,23 +226,124 @@ pub fn notify_running_instance_reload() -> bool {
     true
 }
 
-/// Query the current system DPI scaling factor relative to 96 DPI (e.g. `1.25` at 125% scaling).
-fn query_dpi_scale() -> (i32, f32) {
+thread_local! {
+    /// DPI of the Studio window once it exists. Painting code reads this instead of the system
+    /// DPI so a window on a monitor with a different scale factor draws at that monitor's DPI.
+    static STUDIO_DPI: Cell<u32> = const { Cell::new(0) };
+}
+
+/// System DPI, used only before the Studio window exists.
+fn system_dpi() -> u32 {
     // SAFETY: GetDC(null) retrieves the screen DC, GetDeviceCaps queries logical DPI, and ReleaseDC frees it.
     unsafe {
         let hdc = GetDC(std::ptr::null_mut());
         if hdc.is_null() {
-            return (96, 1.0);
+            return 96;
         }
         let dpi = GetDeviceCaps(hdc, LOGPIXELSY as i32).max(96);
         ReleaseDC(std::ptr::null_mut(), hdc);
-        (dpi, (dpi as f32) / 96.0)
+        dpi as u32
     }
+}
+
+/// Per-window DPI through `GetDpiForWindow` (Windows 10 1607+), resolved at runtime so older
+/// systems fall back to the system DPI instead of failing to start.
+fn window_dpi(hwnd: HWND) -> Option<u32> {
+    type FnGetDpiForWindow = unsafe extern "system" fn(hwnd: HWND) -> u32;
+    let user32_name = wide_string("user32.dll");
+    // SAFETY: user32.dll is loaded in every GUI process; the handle is not freed.
+    let user32 = unsafe { GetModuleHandleW(user32_name.as_ptr()) };
+    if user32.is_null() || hwnd.is_null() {
+        return None;
+    }
+    // SAFETY: Looks up an exported symbol by its null-terminated ANSI name.
+    let address = unsafe { GetProcAddress(user32, c"GetDpiForWindow".as_ptr().cast()) }?;
+    // SAFETY: The signature matches GetDpiForWindow in WinUser.h.
+    let get_dpi: FnGetDpiForWindow = unsafe { mem::transmute(address) };
+    // SAFETY: hwnd is a live window owned by this thread.
+    let dpi = unsafe { get_dpi(hwnd) };
+    (dpi >= 96).then_some(dpi)
+}
+
+/// Current Studio DPI and its scale factor relative to 96 DPI (e.g. `1.25` at 125% scaling).
+fn query_dpi_scale() -> (i32, f32) {
+    let cached = STUDIO_DPI.with(Cell::get);
+    let dpi = if cached >= 96 { cached } else { system_dpi() };
+    (dpi as i32, dpi_scale(dpi))
+}
+
+fn dpi_scale(dpi: u32) -> f32 {
+    (dpi.max(96) as f32) / 96.0
 }
 
 #[inline]
 fn scale_px(px: i32, scale: f32) -> i32 {
     ((px as f32) * scale).round() as i32
+}
+
+/// Convert a logical `(x, y, width, height)` layout rectangle to physical pixels.
+fn scale_rect(rect: LogicalRect, scale: f32) -> LogicalRect {
+    let (x, y, width, height) = rect;
+    (
+        scale_px(x, scale),
+        scale_px(y, scale),
+        scale_px(width, scale),
+        scale_px(height, scale),
+    )
+}
+
+/// Font height for `CreateFontW` (negative = character height) at `points` and `dpi`.
+const fn font_height(points: i32, dpi: u32) -> i32 {
+    -((points * dpi as i32) / 72)
+}
+
+/// The three Studio typefaces, built for one DPI.
+#[derive(Clone, Copy)]
+struct StudioFonts {
+    ui: HFONT,
+    section: HFONT,
+    heading: HFONT,
+}
+
+fn create_studio_font(points: i32, weight: u32, dpi: u32) -> HFONT {
+    let face = wide_string("Segoe UI");
+    // SAFETY: CreateFontW creates a ClearType Segoe UI font; the caller owns and deletes it.
+    unsafe {
+        CreateFontW(
+            font_height(points, dpi),
+            0,
+            0,
+            0,
+            weight as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            OUT_TT_PRECIS as u32,
+            CLIP_DEFAULT_PRECIS as u32,
+            CLEARTYPE_QUALITY as u32,
+            (DEFAULT_PITCH | FF_SWISS) as u32,
+            face.as_ptr(),
+        )
+    }
+}
+
+fn create_studio_fonts(dpi: u32) -> StudioFonts {
+    StudioFonts {
+        ui: create_studio_font(11, FW_NORMAL, dpi),
+        section: create_studio_font(11, FW_SEMIBOLD, dpi),
+        heading: create_studio_font(14, FW_SEMIBOLD, dpi),
+    }
+}
+
+fn delete_studio_fonts(fonts: StudioFonts) {
+    for font in [fonts.ui, fonts.section, fonts.heading] {
+        if !font.is_null() {
+            // SAFETY: Each font was created by create_studio_font and is no longer selected
+            // into any control (callers switch controls to the replacement first).
+            unsafe { DeleteObject(font as HGDIOBJ) };
+        }
+    }
 }
 
 /// Release the console window Windows creates when the Studio is started from Explorer, the
@@ -261,71 +396,105 @@ fn centered_in_work_area(width: i32, height: i32) -> Option<(i32, i32, i32, i32)
         .then(|| center_in_rect(work, width, height))
 }
 
-fn point_segment_distance(point: (f32, f32), start: (f32, f32), end: (f32, f32)) -> f32 {
-    let (px, py) = point;
-    let (sx, sy) = start;
-    let (ex, ey) = end;
-    let dx = ex - sx;
-    let dy = ey - sy;
-    let length_squared = dx * dx + dy * dy;
-    let projection = if length_squared <= f32::EPSILON {
-        0.0
-    } else {
-        (((px - sx) * dx + (py - sy) * dy) / length_squared).clamp(0.0, 1.0)
-    };
-    let nearest_x = sx + projection * dx;
-    let nearest_y = sy + projection * dy;
-    ((px - nearest_x).powi(2) + (py - nearest_y).powi(2)).sqrt()
-}
-
-/// Rasterize the monochrome Auralis mark into a small icon shared by the title bar and tray.
-fn brand_icon_pixels() -> (Vec<u8>, Vec<u8>) {
-    const SIDE: usize = 32;
-    let mut color = vec![0u8; SIDE * SIDE * 4];
+/// Rasterize the Auralis tile (see `crate::brand`) as a `side`-px icon. Returns bottom-up BGRA
+/// pixels with straight alpha plus an all-clear AND mask.
+fn brand_icon_pixels(side: usize) -> (Vec<u8>, Vec<u8>) {
+    let rgba = crate::brand::render_mark(side, crate::brand::Backdrop::Tile);
+    let (pixels, _) = rgba.as_chunks::<4>();
+    // CreateIcon takes bottom-up rows of BGRA.
+    let color: Vec<u8> = pixels
+        .chunks(side)
+        .rev()
+        .flatten()
+        .flat_map(|&[r, g, b, a]| [b, g, r, a])
+        .collect();
     // CreateIcon expects each 1-bit mask scanline to be padded to a 16-bit boundary.
-    let mask_stride = SIDE.div_ceil(16) * 2;
-    let mask = vec![0u8; SIDE * mask_stride];
-    let wave = [
-        (11.0, 20.0),
-        (14.0, 18.0),
-        (16.0, 22.0),
-        (18.0, 17.0),
-        (21.0, 20.0),
-    ];
-
-    for y in 0..SIDE {
-        for x in 0..SIDE {
-            let xf = x as f32 + 0.5;
-            let yf = y as f32 + 0.5;
-            let rounded_x = xf.clamp(6.0, 26.0) - xf;
-            let rounded_y = yf.clamp(6.0, 26.0) - yf;
-            if rounded_x * rounded_x + rounded_y * rounded_y > 36.0 {
-                continue;
-            }
-
-            let on_a = point_segment_distance((xf, yf), (8.0, 25.0), (16.0, 7.0)) <= 1.6
-                || point_segment_distance((xf, yf), (16.0, 7.0), (24.0, 25.0)) <= 1.6;
-            let on_wave = wave.windows(2).any(|segment| {
-                point_segment_distance(
-                    (xf, yf),
-                    (segment[0].0, segment[0].1),
-                    (segment[1].0, segment[1].1),
-                ) <= 1.35
-            });
-            let offset = ((SIDE - 1 - y) * SIDE + x) * 4;
-            let shade = if on_a || on_wave { 242 } else { 24 };
-            color[offset..offset + 4].copy_from_slice(&[shade, shade, shade, 255]);
-        }
-    }
+    let mask = vec![0u8; side * side.div_ceil(16) * 2];
     (color, mask)
 }
 
+/// Paint the bare Auralis mark, anti-aliased, into a `size` px square at (`left`, `top`) over
+/// an opaque `background`. Coordinates come from `crate::brand`, like the app icon.
+///
+/// # Safety
+/// `hdc` must be a valid device context for the duration of the call.
+unsafe fn paint_brand_mark(
+    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+    left: i32,
+    top: i32,
+    size: i32,
+    background: [u8; 3],
+) {
+    use windows_sys::Win32::Graphics::Gdi::{
+        SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    };
+    let Ok(side) = usize::try_from(size) else {
+        return;
+    };
+    let rgba = crate::brand::render_mark(side, crate::brand::Backdrop::Solid(background));
+    // A top-down 32-bit DIB wants BGRX rows.
+    let bgrx: Vec<u8> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, _]| [b, g, r, 0])
+        .collect();
+    let mut info: BITMAPINFO = mem::zeroed();
+    info.bmiHeader = BITMAPINFOHEADER {
+        biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: size,
+        biHeight: -size,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        ..mem::zeroed()
+    };
+    SetDIBitsToDevice(
+        hdc,
+        left,
+        top,
+        size as u32,
+        size as u32,
+        0,
+        0,
+        0,
+        size as u32,
+        bgrx.as_ptr().cast(),
+        &info,
+        DIB_RGB_COLORS,
+    );
+}
+
+/// The Auralis icon at `metric` size (`SM_CXICON` or `SM_CXSMICON`): the hand-tuned
+/// `assets/auralis.ico` embedded as resource 1 by build.rs, or, when the executable has no icon
+/// resource (for example a local GNU build without windres), the same mark rasterized now.
 fn create_brand_icon(
     hinstance: *mut std::ffi::c_void,
+    metric: windows_sys::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX,
 ) -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
-    let (color, mask) = brand_icon_pixels();
-    // SAFETY: The icon buffers have correctly sized 32x32 BGRA pixels and padded AND-mask rows.
-    unsafe { CreateIcon(hinstance, 32, 32, 1, 32, mask.as_ptr(), color.as_ptr()) }
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, LoadImageW, IMAGE_ICON, LR_DEFAULTCOLOR,
+    };
+    // SAFETY: GetSystemMetrics reads a system icon dimension.
+    let side = unsafe { GetSystemMetrics(metric) }.clamp(16, 256);
+    // SAFETY: MAKEINTRESOURCE(1) names the icon group in this module; LoadImageW returns null
+    // when it is absent, and the caller owns (and destroys) the returned icon.
+    let loaded = unsafe {
+        LoadImageW(
+            hinstance,
+            std::ptr::without_provenance::<u16>(1), // MAKEINTRESOURCEW(1)
+            IMAGE_ICON,
+            side,
+            side,
+            LR_DEFAULTCOLOR,
+        )
+    };
+    if !loaded.is_null() {
+        return loaded;
+    }
+    let (color, mask) = brand_icon_pixels(side as usize);
+    // SAFETY: The buffers hold side x side BGRA pixels and AND-mask rows padded to 16 bits.
+    unsafe { CreateIcon(hinstance, side, side, 1, 32, mask.as_ptr(), color.as_ptr()) }
 }
 
 const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
@@ -460,20 +629,14 @@ pub fn run_windows_gui(
     WindowsPlatformAdapter::ensure_dpi_awareness();
     WindowsPlatformAdapter::register_wallpaper_host_class();
 
-    // If an Auralis Studio instance is already running in the background, bring its UI to front
-    let class_wide = wide_string(WINDOW_CLASS_NAME);
-    // SAFETY: FindWindowW checks for an existing Auralis configuration window on the desktop.
-    let existing = unsafe { FindWindowW(class_wide.as_ptr(), std::ptr::null()) };
-    if !existing.is_null() && initial_video.is_none() {
-        // SAFETY: Existing window handle is non-null; sends show message and brings it to foreground.
-        unsafe {
-            SendMessageW(existing, WM_AURALIS_SHOW_UI, 0, 0);
-            ShowWindow(existing, SW_RESTORE);
-            SetForegroundWindow(existing);
-        }
+    // One Studio per signed-in user. The named mutex is created atomically, so two launches
+    // racing each other cannot both pass this check the way a window-class lookup could.
+    let Some(instance_guard) = SingleInstanceGuard::acquire() else {
+        forward_to_running_instance(initial_video.as_deref());
         return Ok(());
-    }
+    };
 
+    let class_wide = wide_string(WINDOW_CLASS_NAME);
     let config_path = AppConfig::default_config_path();
     let (mut config, load_warning) = AppConfig::load_or_recover(&config_path);
     if let Some(warn) = &load_warning {
@@ -484,6 +647,10 @@ pub fn run_windows_gui(
     config.launch_at_startup = startup_actual;
 
     let mut engine = WallpaperEngine::new(config, adapter).map_err(|e| e.to_string())?;
+    let mut startup_warning = None;
+    if startup_actual {
+        startup_warning = refresh_startup_entry(&mut engine);
+    }
 
     // Restore any previously saved wallpaper configuration or apply initial CLI video
     if let Some(video_path) = initial_video {
@@ -502,67 +669,13 @@ pub fn run_windows_gui(
     }
     engine.trim_working_set();
 
-    let (dpi, scale) = query_dpi_scale();
-    let font_height = -((11 * dpi) / 72);
-    let section_font_height = -((11 * dpi) / 72);
-    let font_face = wide_string("Segoe UI");
-    // SAFETY: CreateFontW creates a ClearType-antialiased Segoe UI font scaled to system DPI.
-    let ui_font = unsafe {
-        CreateFontW(
-            font_height,
-            0,
-            0,
-            0,
-            FW_NORMAL as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET as u32,
-            OUT_TT_PRECIS as u32,
-            CLIP_DEFAULT_PRECIS as u32,
-            CLEARTYPE_QUALITY as u32,
-            (DEFAULT_PITCH | FF_SWISS) as u32,
-            font_face.as_ptr(),
-        )
-    };
-    // SAFETY: CreateFontW creates a semibold section-label font at the current system DPI.
-    let section_font = unsafe {
-        CreateFontW(
-            section_font_height,
-            0,
-            0,
-            0,
-            FW_SEMIBOLD as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET as u32,
-            OUT_TT_PRECIS as u32,
-            CLIP_DEFAULT_PRECIS as u32,
-            CLEARTYPE_QUALITY as u32,
-            (DEFAULT_PITCH | FF_SWISS) as u32,
-            font_face.as_ptr(),
-        )
-    };
-    // SAFETY: Creates a larger, bold Segoe UI font for the Auralis wordmark.
-    let heading_font = unsafe {
-        CreateFontW(
-            -((14 * dpi) / 72),
-            0,
-            0,
-            0,
-            FW_SEMIBOLD as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET as u32,
-            OUT_TT_PRECIS as u32,
-            CLIP_DEFAULT_PRECIS as u32,
-            CLEARTYPE_QUALITY as u32,
-            (DEFAULT_PITCH | FF_SWISS) as u32,
-            font_face.as_ptr(),
-        )
-    };
+    // The window does not exist yet, so size it for the system DPI; WM_CREATE and
+    // WM_DPICHANGED switch to the window's own DPI once Windows places it on a monitor.
+    let dpi = system_dpi();
+    let scale = dpi_scale(dpi);
+    let fonts = create_studio_fonts(dpi);
+    let (ui_font, section_font, heading_font) = (fonts.ui, fonts.section, fonts.heading);
+    STUDIO_DPI.with(|cell| cell.set(dpi));
     // SAFETY: Theme brushes and border pen are owned GDI objects released after the UI closes.
     let (background_brush, card_brush, input_brush, border_pen) = unsafe {
         (
@@ -572,13 +685,14 @@ pub fn run_windows_gui(
             CreatePen(0, 1, rgb(48, 48, 50)),
         )
     };
-
     UI_FONT.with(|font| font.set(ui_font));
     GUI_STATE.with(|cell| {
         if let Ok(mut guard) = cell.try_borrow_mut() {
             *guard = Some(GuiState {
                 engine,
                 config_path,
+                dpi,
+                controls: Vec::new(),
                 ui_font,
                 section_font,
                 heading_font,
@@ -613,11 +727,14 @@ pub fn run_windows_gui(
                 preview_path: None,
                 lbl_status: std::ptr::null_mut(),
                 lbl_status_details: std::ptr::null_mut(),
+                lbl_now_file: std::ptr::null_mut(),
+                lbl_now_meta: std::ptr::null_mut(),
                 secondary_labels: Vec::new(),
-                last_error: load_warning,
+                last_error: load_warning.or(startup_warning),
                 last_status_text: String::new(),
                 tray_added: false,
                 brand_icon: std::ptr::null_mut(),
+                brand_icon_large: std::ptr::null_mut(),
                 tick_counter: 0,
             });
         }
@@ -627,11 +744,21 @@ pub fn run_windows_gui(
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
     register_preview_surface_class(hinstance);
 
-    let brand_icon = create_brand_icon(hinstance);
+    // The small icon serves the tray; the large one the window class (Windows derives the
+    // caption icon from it).
+    let brand_icon = create_brand_icon(
+        hinstance,
+        windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSMICON,
+    );
+    let brand_icon_large = create_brand_icon(
+        hinstance,
+        windows_sys::Win32::UI::WindowsAndMessaging::SM_CXICON,
+    );
     GUI_STATE.with(|cell| {
         if let Ok(mut guard) = cell.try_borrow_mut() {
             if let Some(state) = guard.as_mut() {
                 state.brand_icon = brand_icon;
+                state.brand_icon_large = brand_icon_large;
             }
         }
     });
@@ -642,10 +769,10 @@ pub fn run_windows_gui(
             LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
         )
     };
-    let hicon = if brand_icon.is_null() {
+    let hicon = if brand_icon_large.is_null() {
         fallback_icon
     } else {
-        brand_icon
+        brand_icon_large
     };
 
     let wnd_class = WNDCLASSW {
@@ -679,7 +806,13 @@ pub fn run_windows_gui(
         bottom: scale_px(CLIENT_HEIGHT, scale),
     };
     // SAFETY: AdjustWindowRectEx only writes the frame rectangle for the given style.
-    unsafe { AdjustWindowRectEx(&mut frame, style & !WS_VISIBLE, 0, 0) };
+    unsafe { AdjustWindowRectEx(&mut frame, style & !WS_VISIBLE, 0, WS_EX_CONTROLPARENT) };
+    // Explorer broadcasts this message after it (re)creates the taskbar, for example after a
+    // crash or restart; the Studio re-adds its tray icon and re-layers wallpapers in response.
+    let taskbar_created = wide_string("TaskbarCreated");
+    // SAFETY: RegisterWindowMessageW takes a valid null-terminated UTF-16 message name.
+    let taskbar_message = unsafe { RegisterWindowMessageW(taskbar_created.as_ptr()) };
+    TASKBAR_CREATED_MESSAGE.with(|cell| cell.set(taskbar_message));
     let (x, y, width, height) =
         centered_in_work_area(frame.right - frame.left, frame.bottom - frame.top).unwrap_or((
             CW_USEDEFAULT,
@@ -689,9 +822,10 @@ pub fn run_windows_gui(
         ));
 
     // SAFETY: CreateWindowExW creates the main configuration window and triggers WM_CREATE.
+    // WS_EX_CONTROLPARENT lets IsDialogMessageW Tab through the child controls.
     let hwnd = unsafe {
         CreateWindowExW(
-            0,
+            WS_EX_CONTROLPARENT,
             class_wide.as_ptr(),
             title.as_ptr(),
             style,
@@ -707,7 +841,7 @@ pub fn run_windows_gui(
     };
 
     if hwnd.is_null() {
-        return Err("Failed to create Auralis Configuration Studio window".to_string());
+        return Err("Failed to create the Auralis Studio window".to_string());
     }
 
     // Honor Windows dark mode for the native title bar when the OS supports the DWM attribute.
@@ -722,10 +856,22 @@ pub fn run_windows_gui(
         );
     }
 
+    // The frame was sized for the system DPI. If Windows placed the window on a monitor with
+    // another scale factor, rebuild fonts and layout for it and resize the client area to match.
+    if let Some(actual_dpi) = window_dpi(hwnd).filter(|actual| *actual != dpi) {
+        apply_studio_dpi(hwnd, actual_dpi);
+        resize_frame_for_dpi(hwnd, actual_dpi);
+    }
+
     // SAFETY: Standard Win32 message pump driving UI events, timers, and Media Foundation EVR updates.
+    // IsDialogMessageW gives the Studio dialog-style keyboard navigation (Tab, Shift+Tab, Space,
+    // Enter, arrow keys in the selector); messages it handles must not be dispatched again.
     unsafe {
         let mut msg: MSG = mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            if IsWindow(hwnd) != 0 && IsDialogMessageW(hwnd, &msg) != 0 {
+                continue;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -741,24 +887,12 @@ pub fn run_windows_gui(
                 let _ = state.engine.config.save_to_file(&state.config_path);
                 state.engine.shutdown();
                 UI_FONT.with(|font| font.set(std::ptr::null_mut()));
-                if !state.ui_font.is_null() {
-                    // SAFETY: DeleteObject frees the GDI font handle created in run_windows_gui.
-                    unsafe {
-                        DeleteObject(state.ui_font);
-                    }
-                }
-                if !state.heading_font.is_null() {
-                    // SAFETY: DeleteObject frees the heading font handle created in run_windows_gui.
-                    unsafe {
-                        DeleteObject(state.heading_font);
-                    }
-                }
-                if !state.section_font.is_null() {
-                    // SAFETY: DeleteObject frees the section font created in run_windows_gui.
-                    unsafe {
-                        DeleteObject(state.section_font);
-                    }
-                }
+                // The window and its controls are destroyed, so no control still uses the fonts.
+                delete_studio_fonts(StudioFonts {
+                    ui: state.ui_font,
+                    section: state.section_font,
+                    heading: state.heading_font,
+                });
                 for object in [
                     state.background_brush as HGDIOBJ,
                     state.card_brush as HGDIOBJ,
@@ -770,15 +904,242 @@ pub fn run_windows_gui(
                         unsafe { DeleteObject(object) };
                     }
                 }
-                if !state.brand_icon.is_null() {
-                    // SAFETY: The app-owned tray icon was removed in WM_DESTROY before shutdown.
-                    unsafe { DestroyIcon(state.brand_icon) };
+                for icon in [state.brand_icon, state.brand_icon_large] {
+                    if !icon.is_null() {
+                        // SAFETY: The app-owned icons are no longer used: the tray icon was
+                        // removed in WM_DESTROY and the window is gone.
+                        unsafe { DestroyIcon(icon) };
+                    }
                 }
             }
         }
     });
+    STUDIO_DPI.with(|cell| cell.set(0));
+    drop(instance_guard);
 
     Ok(())
+}
+
+thread_local! {
+    /// Registered `TaskbarCreated` message id (0 until registered).
+    static TASKBAR_CREATED_MESSAGE: Cell<u32> = const { Cell::new(0) };
+    /// Child control that had keyboard focus when the Studio was last deactivated.
+    static LAST_FOCUS: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// Owns the named single-instance mutex for the lifetime of the Studio.
+struct SingleInstanceGuard(HANDLE);
+
+impl SingleInstanceGuard {
+    /// Create the session mutex. Returns `None` when another Studio already owns it.
+    fn acquire() -> Option<Self> {
+        let name = wide_string(SINGLE_INSTANCE_MUTEX_NAME);
+        // SAFETY: Creates (or opens) a named mutex with default security; the name is a valid
+        // null-terminated UTF-16 string. GetLastError is read immediately after the call.
+        let (handle, already_exists) = unsafe {
+            let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+            (handle, GetLastError() == ERROR_ALREADY_EXISTS)
+        };
+        if already_exists {
+            if !handle.is_null() {
+                // SAFETY: Releases this process's handle to the other instance's mutex.
+                unsafe { CloseHandle(handle) };
+            }
+            return None;
+        }
+        // If the mutex could not be created at all, run without the guard rather than refuse
+        // to start; the window-class lookup below still finds an obvious duplicate.
+        Some(Self(handle))
+    }
+}
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: Closes the mutex handle this guard created exactly once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+/// Whether another process currently holds the Studio's single-instance mutex.
+fn studio_mutex_exists() -> bool {
+    let name = wide_string(SINGLE_INSTANCE_MUTEX_NAME);
+    // SAFETY: Opens the named mutex for SYNCHRONIZE only, to test for its existence.
+    let handle = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) };
+    if handle.is_null() {
+        return false;
+    }
+    // SAFETY: Closes the handle opened just above.
+    unsafe { CloseHandle(handle) };
+    true
+}
+
+/// Find the running Studio's main window, waiting up to `wait` while it is still starting.
+fn find_studio_window(wait: Duration) -> Option<HWND> {
+    let class_wide = wide_string(WINDOW_CLASS_NAME);
+    let deadline = Instant::now() + wait;
+    loop {
+        // SAFETY: FindWindowW looks up a top-level window by its null-terminated class name.
+        let existing = unsafe { FindWindowW(class_wide.as_ptr(), std::ptr::null()) };
+        if !existing.is_null() {
+            return Some(existing);
+        }
+        if Instant::now() >= deadline || !studio_mutex_exists() {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Hand a second launch over to the Studio that is already running.
+///
+/// A plain launch brings the existing window forward. A launch with a video (for example a file
+/// dropped onto `auralis.exe`) saves it as the primary display's wallpaper and asks the running
+/// Studio to reload, the same way `auralis apply` does, instead of starting a second engine.
+fn forward_to_running_instance(initial_video: Option<&Path>) {
+    let Some(existing) = find_studio_window(EXISTING_WINDOW_WAIT) else {
+        eprintln!("Auralis is already starting. Try again in a few seconds.");
+        return;
+    };
+    if let Some(video) = initial_video {
+        match save_video_for_primary_display(video) {
+            // Reload synchronously, exactly like `auralis apply`, before asking for the window.
+            // SAFETY: Sends the reload request to the live Studio window; no pointers are passed.
+            Ok(()) => unsafe {
+                SendMessageW(existing, WM_AURALIS_RELOAD_CONFIG, 0, 0);
+            },
+            Err(error) => eprintln!("Auralis could not use this video: {error}"),
+        }
+    }
+    // SAFETY: Shows and focuses the existing Studio window owned by the other process.
+    unsafe {
+        PostMessageW(existing, WM_AURALIS_SHOW_UI, 0, 0);
+        ShowWindow(existing, SW_RESTORE);
+        SetForegroundWindow(existing);
+    }
+}
+
+/// Validate `video` and store it as the primary display's wallpaper in the saved configuration.
+fn save_video_for_primary_display(video: &Path) -> Result<(), String> {
+    let mut wallpaper =
+        DisplayWallpaperConfig::new(video.to_path_buf()).map_err(|e| e.to_string())?;
+    let config_path = AppConfig::default_config_path();
+    let (mut config, _) = AppConfig::load_or_recover(&config_path);
+    let displays = create_platform_adapter()
+        .enumerate_displays()
+        .map_err(|e| e.to_string())?;
+    let primary = displays
+        .iter()
+        .find(|d| d.is_primary)
+        .or_else(|| displays.first())
+        .ok_or_else(|| "No active display was found.".to_string())?;
+    if let Some(existing) = config
+        .per_display
+        .get(&primary.id)
+        .or(config.default_wallpaper.as_ref())
+    {
+        wallpaper.loop_playback = existing.loop_playback;
+        wallpaper.muted = existing.muted;
+        wallpaper.volume = existing.volume;
+        wallpaper.speed_percent = existing.speed_percent;
+        wallpaper.aspect_mode = existing.aspect_mode;
+    }
+    config.record_recent_wallpaper(video.to_path_buf());
+    config
+        .per_display
+        .insert(primary.id.clone(), wallpaper.clone());
+    config.default_wallpaper = Some(wallpaper);
+    config.save_to_file(&config_path).map_err(|e| e.to_string())
+}
+
+/// Result of asking a running Studio to quit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitOutcome {
+    /// No Studio was running.
+    NotRunning,
+    /// The Studio quit and its wallpaper hosts were removed.
+    Quit,
+    /// The Studio was asked to quit but was still running when the wait ended.
+    TimedOut,
+}
+
+/// Ask a running Studio to quit and restore the desktop, then wait up to `timeout` for it to
+/// exit. This performs the same action as the Studio's "Quit and restore desktop" button:
+/// wallpaper playback stops, host windows are destroyed, and the configuration is saved.
+#[must_use]
+pub fn quit_running_instance(timeout: Duration) -> QuitOutcome {
+    WindowsPlatformAdapter::ensure_dpi_awareness();
+    // Returns at once when no Studio exists; waits briefly only if one is still starting.
+    let Some(window) = find_studio_window(Duration::from_secs(1)) else {
+        return QuitOutcome::NotRunning;
+    };
+    let mut process_id = 0u32;
+    // SAFETY: Reads the owning process id of a window handle into a local value.
+    unsafe { GetWindowThreadProcessId(window, &mut process_id) };
+    let process = if process_id == 0 {
+        std::ptr::null_mut()
+    } else {
+        // SAFETY: Opens the Studio process for SYNCHRONIZE only, so this call can wait on it.
+        unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, process_id) }
+    };
+
+    // WM_COMMAND with the quit button's id is the button's own action. Studio builds that
+    // predate this command handle it identically, so an installer can close any version.
+    // SAFETY: Posts a command message to the live Studio window; no pointers are passed.
+    let posted = unsafe { PostMessageW(window, WM_COMMAND, ID_BTN_QUIT, 0) } != 0;
+    if !posted {
+        if !process.is_null() {
+            // SAFETY: Closes the process handle opened above.
+            unsafe { CloseHandle(process) };
+        }
+        return QuitOutcome::TimedOut;
+    }
+
+    let exited = if process.is_null() {
+        // Without a process handle, wait for the window itself to disappear.
+        let deadline = Instant::now() + timeout;
+        // SAFETY: IsWindow only checks whether the handle is still in the window table.
+        while unsafe { IsWindow(window) } != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // SAFETY: Same window-table query as above.
+        unsafe { IsWindow(window) == 0 }
+    } else {
+        let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+        // SAFETY: Waits on the process handle opened above, then closes it.
+        unsafe {
+            let result = WaitForSingleObject(process, millis);
+            CloseHandle(process);
+            result == WAIT_OBJECT_0
+        }
+    };
+    if exited {
+        QuitOutcome::Quit
+    } else {
+        QuitOutcome::TimedOut
+    }
+}
+
+/// Keep the sign-in entry pointing at this executable, so moving or reinstalling Auralis does
+/// not leave a `Run` command that launches a missing or outdated copy. Returns a notice when
+/// the entry could not be updated.
+fn refresh_startup_entry(engine: &mut WallpaperEngine) -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let expected = startup_command_for(&exe);
+    let current = read_startup_command();
+    if current
+        .as_deref()
+        .is_some_and(|stored| startup_command_matches(stored, &expected))
+    {
+        return None;
+    }
+    engine.set_launch_at_startup(true).err().map(|error| {
+        format!(
+            "Could not update the sign-in entry to this copy of Auralis ({error}). Turn \
+             \"Start Auralis when I sign in\" off and on again to retry."
+        )
+    })
 }
 
 /// Register the Auralis system tray icon (`Shell_NotifyIconW`) for background operation.
@@ -801,7 +1162,8 @@ fn add_tray_icon(hwnd: HWND) {
         .unwrap_or_else(|| unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) });
 
     let tip = wide_string(&format!(
-        "Auralis Live Wallpaper Studio v{} (Right-click for controls)",
+        "Auralis v{}
+Right-click for controls",
         crate::version_label()
     ));
     let copy_len = tip.len().min(nid.szTip.len() - 1);
@@ -872,6 +1234,8 @@ fn paint_main_window(hwnd: HWND) {
         return;
     }
 
+    // A WM_PAINT can arrive from a nested message pump while GUI_STATE is mutably borrowed.
+    let state_busy = GUI_STATE.with(|cell| cell.try_borrow().is_err());
     let snapshot = GUI_STATE.with(|cell| {
         cell.try_borrow().ok().and_then(|guard| {
             let state = guard.as_ref()?;
@@ -898,6 +1262,12 @@ fn paint_main_window(hwnd: HWND) {
     }) else {
         // SAFETY: Completes the paint cycle even if the window is shutting down.
         unsafe { EndPaint(hwnd, &paint) };
+        if state_busy {
+            // Ask for this region again once the borrow is released; otherwise the cards would
+            // stay unpainted until something else invalidates them.
+            // SAFETY: Re-invalidates part of this live window; WM_PAINT is low priority.
+            unsafe { windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, &paint.rcPaint, 0) };
+        }
         return;
     };
 
@@ -929,22 +1299,17 @@ fn paint_main_window(hwnd: HWND) {
         SelectObject(hdc, old_brush);
         SelectObject(hdc, old_pen);
 
-        // A compact geometric A mark echoes the standalone SVG wordmark.
-        let mark_pen = CreatePen(0, px(2).max(1), rgb(232, 232, 234));
-        if !mark_pen.is_null() {
-            let old_mark_pen = SelectObject(hdc, mark_pen as HGDIOBJ);
-            MoveToEx(hdc, px(24), px(40), std::ptr::null_mut());
-            LineTo(hdc, px(36), px(15));
-            LineTo(hdc, px(48), px(40));
-            MoveToEx(hdc, px(28), px(32), std::ptr::null_mut());
-            LineTo(hdc, px(32), px(32));
-            LineTo(hdc, px(36), px(25));
-            LineTo(hdc, px(40), px(36));
-            LineTo(hdc, px(44), px(29));
-            LineTo(hdc, px(47), px(29));
-            SelectObject(hdc, old_mark_pen);
-            DeleteObject(mark_pen as HGDIOBJ);
-        }
+        // The brand mark on a 36px grid square over the window background (13, 13, 14), vertically
+        // centered in the header; its inked
+        // part spans x 24..48 so the wordmark at x 60 keeps a 12px gap.
+        let mark_size = px(36);
+        paint_brand_mark(
+            hdc,
+            px(18),
+            (px(HEADER_HEIGHT) - mark_size) / 2,
+            mark_size,
+            [13, 13, 14],
+        );
 
         SetBkMode(hdc, TRANSPARENT as i32);
         let old_font = if snap.heading_font.is_null() {
@@ -1235,8 +1600,8 @@ unsafe fn draw_action_button(item: &DRAWITEMSTRUCT) {
         None => GetWindowTextW(item.hwndItem, text.as_mut_ptr(), text.len() as i32),
     };
     let mut text_rect = item.rcItem;
-    text_rect.left += 8;
-    text_rect.right -= 8;
+    text_rect.left += scale_px(8, query_dpi_scale().1);
+    text_rect.right -= scale_px(8, query_dpi_scale().1);
     DrawTextW(
         item.hDC,
         text.as_ptr(),
@@ -1479,8 +1844,8 @@ unsafe fn draw_display_item(item: &DRAWITEMSTRUCT) {
         item.rcItem.top,
         item.rcItem.right,
         item.rcItem.bottom,
-        8,
-        8,
+        scale_px(8, query_dpi_scale().1),
+        scale_px(8, query_dpi_scale().1),
     );
     SelectObject(item.hDC, old_brush);
     SelectObject(item.hDC, old_pen);
@@ -1513,8 +1878,8 @@ unsafe fn draw_display_item(item: &DRAWITEMSTRUCT) {
     let old_font = SelectObject(item.hDC, font as HGDIOBJ);
     SetTextColor(item.hDC, rgb(238, 238, 240));
     let mut text_rect = item.rcItem;
-    text_rect.left += 10;
-    text_rect.right -= 8;
+    text_rect.left += scale_px(10, query_dpi_scale().1);
+    text_rect.right -= scale_px(8, query_dpi_scale().1);
     DrawTextW(
         item.hDC,
         text.as_ptr(),
@@ -1642,8 +2007,18 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let taskbar_created = TASKBAR_CREATED_MESSAGE.with(Cell::get);
+    if taskbar_created != 0 && msg == taskbar_created {
+        // Explorer restarted: its tray forgot our icon and the desktop layer that held the
+        // wallpaper hosts was destroyed with it.
+        add_tray_icon(hwnd);
+        recover_wallpaper_hosts();
+        return 0;
+    }
     match msg {
         WM_CREATE => {
+            // Controls are laid out for the creation DPI; run_windows_gui re-lays them out if
+            // the window landed on a monitor with a different DPI.
             create_child_controls(hwnd);
             add_tray_icon(hwnd);
             // SAFETY: DragAcceptFiles enables drag-and-drop of video files onto `hwnd`.
@@ -1756,7 +2131,7 @@ unsafe extern "system" fn window_proc(
                 let item = unsafe { &mut *(lparam as *mut MEASUREITEMSTRUCT) };
                 if item.CtlID as usize == ID_CMB_DISPLAY {
                     let (_, scale) = query_dpi_scale();
-                    item.itemHeight = scale_px(30, scale) as u32;
+                    item.itemHeight = scale_px(DISPLAY_ITEM_HEIGHT, scale) as u32;
                     1
                 } else {
                     0
@@ -1883,6 +2258,19 @@ unsafe extern "system" fn window_proc(
         }
         WM_TIMER => {
             if wparam == ID_TIMER_TICK {
+                let check_hosts = GUI_STATE.with(|cell| {
+                    cell.try_borrow()
+                        .ok()
+                        .and_then(|guard| {
+                            guard
+                                .as_ref()
+                                .map(|state| state.tick_counter % HOST_CHECK_TICKS == 0)
+                        })
+                        .unwrap_or(false)
+                });
+                if check_hosts {
+                    recover_wallpaper_hosts();
+                }
                 let (ticked, animate_live, refresh_status) = GUI_STATE.with(|cell| {
                     if let Ok(mut guard) = cell.try_borrow_mut() {
                         if let Some(state) = guard.as_mut() {
@@ -1934,6 +2322,10 @@ unsafe extern "system" fn window_proc(
             let notify_code = (wparam >> 16) & 0xFFFF;
             if control_id == ID_EDT_PATH && notify_code == EN_CHANGE {
                 update_enabled_controls();
+            } else if control_id == IDOK as usize && lparam == 0 {
+                // IsDialogMessageW turns Enter into IDOK. Owner-drawn buttons do not claim
+                // Enter themselves, so press the focused one.
+                press_focused_button(hwnd);
             } else {
                 handle_command(hwnd, control_id, notify_code);
             }
@@ -1967,6 +2359,70 @@ unsafe extern "system" fn window_proc(
             } else {
                 // SAFETY: Destroys hwnd and triggers WM_DESTROY to exit the application.
                 unsafe { DestroyWindow(hwnd) };
+            }
+            0
+        }
+        WM_DPICHANGED => {
+            let new_dpi = (wparam & 0xFFFF) as u32;
+            apply_studio_dpi(hwnd, new_dpi);
+            if lparam != 0 {
+                // SAFETY: For WM_DPICHANGED, lparam points to the RECT Windows suggests for the
+                // window at the new DPI; it is valid for the duration of this message.
+                let suggested = unsafe { *(lparam as *const RECT) };
+                // SAFETY: Moves/resizes this top-level window to the suggested frame.
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        std::ptr::null_mut(),
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+            }
+            // SAFETY: Repaints cards, header, and children at the new scale.
+            unsafe { windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 1) };
+            0
+        }
+        WM_ACTIVATE => {
+            if (wparam & 0xFFFF) as u32 == WA_INACTIVE {
+                // SAFETY: GetFocus/IsChild only query focus and window relationships.
+                let focused = unsafe { GetFocus() };
+                if !focused.is_null() && unsafe { IsChild(hwnd, focused) } != 0 {
+                    LAST_FOCUS.with(|cell| cell.set(focused));
+                }
+            } else {
+                let saved = LAST_FOCUS.with(Cell::get);
+                // SAFETY: Restores focus only to a live child of this window, like a dialog.
+                if !saved.is_null() && unsafe { IsChild(hwnd, saved) } != 0 {
+                    unsafe { SetFocus(saved) };
+                    return 0;
+                }
+            }
+            // SAFETY: Default activation handling for every other case.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_QUERYENDSESSION => {
+            // Windows is signing out or shutting down: persist settings now, while it is safe.
+            save_config_now();
+            1
+        }
+        WM_ENDSESSION => {
+            if wparam != 0 {
+                // The session is ending and the process may be terminated after this returns,
+                // so stop playback, remove the hosts and tray icon, and save.
+                stop_in_app_preview();
+                GUI_STATE.with(|cell| {
+                    if let Ok(mut guard) = cell.try_borrow_mut() {
+                        if let Some(state) = guard.as_mut() {
+                            let _ = state.engine.config.save_to_file(&state.config_path);
+                            state.engine.shutdown();
+                        }
+                    }
+                });
+                remove_tray_icon(hwnd);
             }
             0
         }
@@ -2042,404 +2498,637 @@ fn apply_display_combo_labels(cmb_display: HWND, labels: &[String]) {
     }
 }
 
+/// Logical (96 DPI) `(x, y, width, height)` rectangle on the Studio layout grid.
+type LogicalRect = (i32, i32, i32, i32);
+
+/// Which Studio font a control uses; fonts are recreated whenever the DPI changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FontRole {
+    Body,
+    Section,
+}
+
+/// Which `GuiState` handle a control fills, if any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    None,
+    Preview,
+    PreviewEmpty,
+    BtnPreview,
+    BtnStopPreview,
+    CmbDisplay,
+    EdtPath,
+    BtnNextRecent,
+    NowFile,
+    NowMeta,
+    BtnApply,
+    BtnPauseResume,
+    BtnStop,
+    ChkMute,
+    ChkLoop,
+    BtnAspect,
+    BtnVolDown,
+    LblVolume,
+    BtnVolUp,
+    BtnSpeedDown,
+    LblSpeed,
+    BtnSpeedUp,
+    ChkFullscreen,
+    ChkBattery,
+    ChkStartup,
+    ChkReduceMotion,
+    LblStatus,
+    LblStatusDetails,
+}
+
+/// One child control of the Studio window. The table below is the single source of truth for
+/// creation, keyboard (Tab) order, and DPI re-layout.
+#[derive(Debug)]
+struct ControlSpec {
+    class: &'static str,
+    text: &'static str,
+    style: u32,
+    rect: LogicalRect,
+    id: usize,
+    slot: Slot,
+    font: FontRole,
+    /// Painted in the secondary text tone.
+    secondary: bool,
+}
+
+const PUSH: u32 = BS_PUSHBUTTON as u32 | WS_TABSTOP;
+const CHECK: u32 = BS_AUTOCHECKBOX as u32 | WS_TABSTOP;
+const LABEL: u32 = SS_NOPREFIX;
+
+const fn control(
+    class: &'static str,
+    text: &'static str,
+    style: u32,
+    rect: LogicalRect,
+    id: usize,
+    slot: Slot,
+) -> ControlSpec {
+    ControlSpec {
+        class,
+        text,
+        style,
+        rect,
+        id,
+        slot,
+        font: FontRole::Body,
+        secondary: false,
+    }
+}
+
+const fn section(text: &'static str, rect: LogicalRect) -> ControlSpec {
+    ControlSpec {
+        font: FontRole::Section,
+        ..control("STATIC", text, LABEL, rect, 0, Slot::None)
+    }
+}
+
+const fn secondary(text: &'static str, style: u32, rect: LogicalRect, slot: Slot) -> ControlSpec {
+    ControlSpec {
+        secondary: true,
+        ..control("STATIC", text, style, rect, 0, slot)
+    }
+}
+
+/// Studio controls in creation order. Windows moves keyboard focus in creation (z) order, so
+/// this order is also the Tab order: preview, wallpaper source, playback, behavior, status;
+/// top to bottom and left to right inside each card.
+static CONTROL_LAYOUT: &[ControlSpec] = &[
+    // Preview card (24, 56)..(584, 464). Inner column x 48..560.
+    section("Preview", (48, 72, 200, 24)),
+    // 512 x 288 is an exact 16:9 surface.
+    control(
+        PREVIEW_CLASS_NAME,
+        "",
+        WS_BORDER | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        (48, 104, 512, 288),
+        0,
+        Slot::Preview,
+    ),
+    control(
+        "STATIC",
+        "Choose a video to see it in motion",
+        SS_CENTER | SS_NOPREFIX,
+        (64, 240, 480, 48),
+        0,
+        Slot::PreviewEmpty,
+    ),
+    control(
+        "BUTTON",
+        "Preview",
+        PUSH,
+        (48, 408, 252, 36),
+        ID_BTN_PREVIEW,
+        Slot::BtnPreview,
+    ),
+    control(
+        "BUTTON",
+        "Stop preview",
+        PUSH,
+        (308, 408, 252, 36),
+        ID_BTN_STOP_PREVIEW,
+        Slot::BtnStopPreview,
+    ),
+    // Wallpaper card (600, 56)..(1136, 464). Inner column x 624..1112.
+    section("Wallpaper", (624, 72, 200, 24)),
+    secondary("Display", LABEL, (624, 104, 200, 20), Slot::None),
+    control(
+        "COMBOBOX",
+        "",
+        CBS_DROPDOWNLIST as u32 | CBS_OWNERDRAWFIXED as u32 | CBS_HASSTRINGS as u32 | WS_TABSTOP,
+        (624, 128, 488, 32),
+        ID_CMB_DISPLAY,
+        Slot::CmbDisplay,
+    ),
+    secondary("Video file", LABEL, (624, 168, 200, 20), Slot::None),
+    // Borderless EDIT inset inside PATH_FIELD_RECT (624, 192)..(880, 228).
+    control(
+        "EDIT",
+        "",
+        WS_TABSTOP | ES_AUTOHSCROLL as u32,
+        (636, 200, 232, 20),
+        ID_EDT_PATH,
+        Slot::EdtPath,
+    ),
+    control(
+        "BUTTON",
+        "Browse",
+        PUSH,
+        (888, 192, 108, 36),
+        ID_BTN_BROWSE,
+        Slot::None,
+    ),
+    control(
+        "BUTTON",
+        "Next recent",
+        PUSH,
+        (1004, 192, 108, 36),
+        ID_BTN_NEXT_RECENT,
+        Slot::BtnNextRecent,
+    ),
+    secondary(
+        "Or drop a video file anywhere on this window.",
+        LABEL,
+        (624, 240, 488, 20),
+        Slot::None,
+    ),
+    // What the selected display is showing right now.
+    secondary("On this display", LABEL, (624, 272, 488, 20), Slot::None),
+    secondary(
+        "",
+        LABEL | SS_ENDELLIPSIS,
+        (624, 296, 488, 20),
+        Slot::NowFile,
+    ),
+    secondary(
+        "",
+        LABEL | SS_ENDELLIPSIS,
+        (624, 320, 488, 20),
+        Slot::NowMeta,
+    ),
+    control(
+        "BUTTON",
+        "Set as wallpaper",
+        PUSH,
+        (624, 356, 488, 44),
+        ID_BTN_APPLY,
+        Slot::BtnApply,
+    ),
+    control(
+        "BUTTON",
+        "Pause wallpaper",
+        PUSH,
+        (624, 408, 240, 36),
+        ID_BTN_PAUSE_RESUME,
+        Slot::BtnPauseResume,
+    ),
+    control(
+        "BUTTON",
+        "Stop wallpaper",
+        PUSH,
+        (872, 408, 240, 36),
+        ID_BTN_STOP,
+        Slot::BtnStop,
+    ),
+    // Playback card (24, 480)..(584, 632).
+    section("Playback", (48, 496, 200, 24)),
+    control(
+        "BUTTON",
+        "Mute audio",
+        CHECK,
+        (48, 532, 128, 28),
+        ID_CHK_MUTE,
+        Slot::ChkMute,
+    ),
+    control(
+        "BUTTON",
+        "Loop video",
+        CHECK,
+        (184, 532, 128, 28),
+        ID_CHK_LOOP,
+        Slot::ChkLoop,
+    ),
+    control(
+        "BUTTON",
+        "Scale: Fill",
+        PUSH,
+        (400, 528, 160, 36),
+        ID_BTN_ASPECT,
+        Slot::BtnAspect,
+    ),
+    control(
+        "BUTTON",
+        "Volume down",
+        PUSH,
+        (48, 580, 36, 36),
+        ID_BTN_VOL_DOWN,
+        Slot::BtnVolDown,
+    ),
+    control(
+        "STATIC",
+        "Volume 0%",
+        SS_CENTER | SS_NOPREFIX,
+        (88, 588, 112, 20),
+        0,
+        Slot::LblVolume,
+    ),
+    control(
+        "BUTTON",
+        "Volume up",
+        PUSH,
+        (204, 580, 36, 36),
+        ID_BTN_VOL_UP,
+        Slot::BtnVolUp,
+    ),
+    control(
+        "BUTTON",
+        "Slower",
+        PUSH,
+        (368, 580, 36, 36),
+        ID_BTN_SPEED_DOWN,
+        Slot::BtnSpeedDown,
+    ),
+    control(
+        "STATIC",
+        "Speed 1.00×",
+        SS_CENTER | SS_NOPREFIX,
+        (408, 588, 112, 20),
+        0,
+        Slot::LblSpeed,
+    ),
+    control(
+        "BUTTON",
+        "Faster",
+        PUSH,
+        (524, 580, 36, 36),
+        ID_BTN_SPEED_UP,
+        Slot::BtnSpeedUp,
+    ),
+    // Behavior card (600, 480)..(1136, 632).
+    section("Behavior", (624, 496, 200, 24)),
+    control(
+        "BUTTON",
+        "Pause while a full-screen app is open",
+        CHECK,
+        (624, 528, 488, 24),
+        ID_CHK_FULLSCREEN,
+        Slot::ChkFullscreen,
+    ),
+    control(
+        "BUTTON",
+        "Pause on battery power",
+        CHECK,
+        (624, 552, 488, 24),
+        ID_CHK_BATTERY,
+        Slot::ChkBattery,
+    ),
+    control(
+        "BUTTON",
+        "Start Auralis when I sign in",
+        CHECK,
+        (624, 576, 488, 24),
+        ID_CHK_STARTUP,
+        Slot::ChkStartup,
+    ),
+    control(
+        "BUTTON",
+        "Reduce motion",
+        CHECK,
+        (624, 600, 488, 24),
+        ID_CHK_REDUCE_MOTION,
+        Slot::ChkReduceMotion,
+    ),
+    // Status card (24, 648)..(1136, 732).
+    ControlSpec {
+        font: FontRole::Section,
+        ..control(
+            "STATIC",
+            "Wallpaper engine starting",
+            LABEL,
+            (48, 660, 720, 20),
+            0,
+            Slot::LblStatus,
+        )
+    },
+    secondary("", LABEL, (48, 680, 720, 40), Slot::LblStatusDetails),
+    control(
+        "BUTTON",
+        "Hide to tray",
+        PUSH,
+        (784, 668, 144, 36),
+        ID_BTN_HIDE,
+        Slot::None,
+    ),
+    control(
+        "BUTTON",
+        "Quit and restore desktop",
+        PUSH,
+        (936, 668, 176, 36),
+        ID_BTN_QUIT,
+        Slot::None,
+    ),
+];
+
+fn assign_slot(state: &mut GuiState, slot: Slot, hwnd: HWND) {
+    let target = match slot {
+        Slot::None => return,
+        Slot::Preview => &mut state.hwnd_preview,
+        Slot::PreviewEmpty => &mut state.lbl_preview_empty,
+        Slot::BtnPreview => &mut state.btn_preview,
+        Slot::BtnStopPreview => &mut state.btn_stop_preview,
+        Slot::CmbDisplay => &mut state.cmb_display,
+        Slot::EdtPath => &mut state.edt_path,
+        Slot::BtnNextRecent => &mut state.btn_next_recent,
+        Slot::NowFile => &mut state.lbl_now_file,
+        Slot::NowMeta => &mut state.lbl_now_meta,
+        Slot::BtnApply => &mut state.btn_apply,
+        Slot::BtnPauseResume => &mut state.btn_pause_resume,
+        Slot::BtnStop => &mut state.btn_stop,
+        Slot::ChkMute => &mut state.chk_mute,
+        Slot::ChkLoop => &mut state.chk_loop,
+        Slot::BtnAspect => &mut state.btn_aspect,
+        Slot::BtnVolDown => &mut state.btn_vol_down,
+        Slot::LblVolume => &mut state.lbl_volume,
+        Slot::BtnVolUp => &mut state.btn_vol_up,
+        Slot::BtnSpeedDown => &mut state.btn_speed_down,
+        Slot::LblSpeed => &mut state.lbl_speed,
+        Slot::BtnSpeedUp => &mut state.btn_speed_up,
+        Slot::ChkFullscreen => &mut state.chk_fullscreen,
+        Slot::ChkBattery => &mut state.chk_battery,
+        Slot::ChkStartup => &mut state.chk_startup,
+        Slot::ChkReduceMotion => &mut state.chk_reduce_motion,
+        Slot::LblStatus => &mut state.lbl_status,
+        Slot::LblStatusDetails => &mut state.lbl_status_details,
+    };
+    *target = hwnd;
+}
+
+/// Height of each display-selector row and of its closed selection field, in logical pixels.
+const DISPLAY_ITEM_HEIGHT: i32 = 30;
+
+fn font_for(role: FontRole, ui: HFONT, section: HFONT) -> HFONT {
+    match role {
+        FontRole::Body => ui,
+        FontRole::Section => section,
+    }
+}
+
 fn create_child_controls(parent: HWND) {
     let (_, scale) = query_dpi_scale();
     // SAFETY: GetModuleHandleW retrieves the current process module handle.
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    let (hfont, hsection_font) = GUI_STATE.with(|cell| {
-        cell.try_borrow()
-            .ok()
-            .and_then(|g| g.as_ref().map(|s| (s.ui_font, s.section_font)))
-            .map(|(ui, section)| {
-                let fallback = || unsafe { GetStockObject(DEFAULT_GUI_FONT) };
-                (
-                    if ui.is_null() { fallback() } else { ui },
-                    if section.is_null() {
-                        fallback()
-                    } else {
-                        section
-                    },
-                )
-            })
-            .unwrap_or_else(|| unsafe {
-                let fallback = GetStockObject(DEFAULT_GUI_FONT);
-                (fallback, fallback)
-            })
-    });
-    let mk_ctrl = |class: &str,
-                   text: &str,
-                   mut style: u32,
-                   x: i32,
-                   y: i32,
-                   w: i32,
-                   h: i32,
-                   id: usize|
-     -> HWND {
-        if class == "BUTTON" && style & 0x000F == BS_PUSHBUTTON as u32 {
+    let (ui_font, section_font) = GUI_STATE
+        .with(|cell| {
+            cell.try_borrow()
+                .ok()
+                .and_then(|g| g.as_ref().map(|s| (s.ui_font, s.section_font)))
+        })
+        .unwrap_or((std::ptr::null_mut(), std::ptr::null_mut()));
+    // SAFETY: GetStockObject returns a process-owned stock font used only as a fallback.
+    let fallback = unsafe { GetStockObject(DEFAULT_GUI_FONT) } as HFONT;
+    let ui_font = if ui_font.is_null() { fallback } else { ui_font };
+    let section_font = if section_font.is_null() {
+        fallback
+    } else {
+        section_font
+    };
+
+    let mut created: Vec<(HWND, &'static ControlSpec)> = Vec::with_capacity(CONTROL_LAYOUT.len());
+    for spec in CONTROL_LAYOUT {
+        let mut style = spec.style;
+        if spec.class == "BUTTON" && style & 0x000F == BS_PUSHBUTTON as u32 {
             style = (style & !(BS_PUSHBUTTON as u32)) | BS_OWNERDRAW as u32;
         }
-        let ex_style = if class == "STATIC" || style & 0x000F == BS_AUTOCHECKBOX as u32 {
+        let ex_style = if spec.class == "STATIC" || style & 0x000F == BS_AUTOCHECKBOX as u32 {
             WS_EX_TRANSPARENT
         } else {
             0
         };
-        let cls = wide_string(class);
-        let txt = wide_string(text);
-        // SAFETY: Creates a DPI-scaled child Win32 control and applies the application font.
-        unsafe {
-            let ctrl = CreateWindowExW(
+        let class = wide_string(spec.class);
+        let text = wide_string(spec.text);
+        let (x, y, width, height) = scale_rect(spec.rect, scale);
+        // SAFETY: Creates a DPI-scaled child control of the live Studio window and applies the
+        // application font. The id is passed through the HMENU parameter as Win32 requires.
+        let ctrl = unsafe {
+            CreateWindowExW(
                 ex_style,
-                cls.as_ptr(),
-                txt.as_ptr(),
+                class.as_ptr(),
+                text.as_ptr(),
                 WS_CHILD | WS_VISIBLE | style,
-                scale_px(x, scale),
-                scale_px(y, scale),
-                scale_px(w, scale),
-                scale_px(h, scale),
+                x,
+                y,
+                width,
+                height,
                 parent,
-                id as *mut _,
+                spec.id as *mut _,
                 hinstance,
                 std::ptr::null(),
-            );
-            if !ctrl.is_null() {
-                SendMessageW(ctrl, WM_SETFONT, hfont as WPARAM, 1);
-                if is_checkbox_control_id(id) {
-                    let subclass_proc: SUBCLASSPROC = Some(checkbox_subclass_proc);
-                    // SAFETY: The subclass only custom-paints this native checkbox; all input and
-                    // accessibility messages continue through DefSubclassProc.
-                    if SetWindowSubclass(ctrl, subclass_proc, id, 0) == 0 {
-                        eprintln!("Auralis could not apply checkbox styling to control {id}.");
-                    }
-                }
+            )
+        };
+        if ctrl.is_null() {
+            continue;
+        }
+        let font = font_for(spec.font, ui_font, section_font);
+        // SAFETY: Applies a long-lived Studio font to the new child control.
+        unsafe { SendMessageW(ctrl, WM_SETFONT, font as WPARAM, 1) };
+        if is_checkbox_control_id(spec.id) {
+            let subclass_proc: SUBCLASSPROC = Some(checkbox_subclass_proc);
+            // SAFETY: The subclass only custom-paints this native checkbox; all input and
+            // accessibility messages continue through DefSubclassProc.
+            if unsafe { SetWindowSubclass(ctrl, subclass_proc, spec.id, 0) } == 0 {
+                eprintln!(
+                    "Auralis could not apply checkbox styling to control {}.",
+                    spec.id
+                );
             }
-            ctrl
         }
-    };
-    let mk_section = |text: &str, x: i32, y: i32, w: i32| -> HWND {
-        let control = mk_ctrl("STATIC", text, SS_NOPREFIX, x, y, w, 24, 0);
-        if !control.is_null() {
-            // SAFETY: Applies the long-lived section font to this valid static control.
-            unsafe { SendMessageW(control, WM_SETFONT, hsection_font as WPARAM, 1) };
-        }
-        control
-    };
-
-    let push = BS_PUSHBUTTON as u32 | WS_TABSTOP;
-    let check = BS_AUTOCHECKBOX as u32 | WS_TABSTOP;
-    let mut secondary_labels = Vec::new();
-
-    // Preview card: (24, 56) to (584, 464). Inner column x 48..560.
-    mk_section("Preview", 48, 72, 200);
-    // 512 x 288 is an exact 16:9 surface.
-    let hwnd_preview = mk_ctrl(
-        PREVIEW_CLASS_NAME,
-        "",
-        WS_BORDER | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-        48,
-        104,
-        512,
-        288,
-        0,
-    );
-    let lbl_preview_empty = mk_ctrl(
-        "STATIC",
-        "Choose a video to see it in motion",
-        SS_CENTER | SS_NOPREFIX,
-        64,
-        240,
-        480,
-        48,
-        0,
-    );
-    let btn_preview = mk_ctrl("BUTTON", "Preview", push, 48, 408, 252, 36, ID_BTN_PREVIEW);
-    let btn_stop_preview = mk_ctrl(
-        "BUTTON",
-        "Stop preview",
-        push,
-        308,
-        408,
-        252,
-        36,
-        ID_BTN_STOP_PREVIEW,
-    );
-
-    // Source card: (600, 56) to (1136, 464). Inner column x 624..1112.
-    mk_section("Wallpaper", 624, 72, 200);
-    secondary_labels.push(mk_ctrl(
-        "STATIC",
-        "Display",
-        SS_NOPREFIX,
-        624,
-        104,
-        200,
-        20,
-        0,
-    ));
-    let cmb_display = mk_ctrl(
-        "COMBOBOX",
-        "",
-        CBS_DROPDOWNLIST as u32 | CBS_OWNERDRAWFIXED as u32 | CBS_HASSTRINGS as u32 | WS_TABSTOP,
-        624,
-        128,
-        488,
-        32,
-        ID_CMB_DISPLAY,
-    );
-    secondary_labels.push(mk_ctrl(
-        "STATIC",
-        "Video file",
-        SS_NOPREFIX,
-        624,
-        168,
-        200,
-        20,
-        0,
-    ));
-    // Borderless EDIT inset inside PATH_FIELD_RECT (624, 192)..(880, 228).
-    let edt_path = mk_ctrl(
-        "EDIT",
-        "",
-        WS_TABSTOP | ES_AUTOHSCROLL as u32,
-        636,
-        200,
-        232,
-        20,
-        ID_EDT_PATH,
-    );
-    mk_ctrl("BUTTON", "Browse", push, 888, 192, 108, 36, ID_BTN_BROWSE);
-    let btn_next_recent = mk_ctrl(
-        "BUTTON",
-        "Next recent",
-        push,
-        1004,
-        192,
-        108,
-        36,
-        ID_BTN_NEXT_RECENT,
-    );
-    let btn_apply = mk_ctrl(
-        "BUTTON",
-        "Set as wallpaper",
-        push,
-        624,
-        356,
-        488,
-        44,
-        ID_BTN_APPLY,
-    );
-    let btn_pause_resume = mk_ctrl(
-        "BUTTON",
-        "Pause wallpaper",
-        push,
-        624,
-        408,
-        240,
-        36,
-        ID_BTN_PAUSE_RESUME,
-    );
-    let btn_stop = mk_ctrl(
-        "BUTTON",
-        "Stop wallpaper",
-        push,
-        872,
-        408,
-        240,
-        36,
-        ID_BTN_STOP,
-    );
-    secondary_labels.push(mk_ctrl(
-        "STATIC",
-        "Or drop a video file anywhere on this window.",
-        SS_NOPREFIX,
-        624,
-        240,
-        488,
-        20,
-        0,
-    ));
-
-    // Playback card: (24, 480) to (584, 632).
-    mk_section("Playback", 48, 496, 200);
-    let chk_mute = mk_ctrl("BUTTON", "Mute audio", check, 48, 532, 128, 28, ID_CHK_MUTE);
-    let chk_loop = mk_ctrl(
-        "BUTTON",
-        "Loop video",
-        check,
-        184,
-        532,
-        128,
-        28,
-        ID_CHK_LOOP,
-    );
-    let btn_aspect = mk_ctrl(
-        "BUTTON",
-        "Scale: Fill",
-        push,
-        400,
-        528,
-        160,
-        36,
-        ID_BTN_ASPECT,
-    );
-    let btn_vol_down = mk_ctrl(
-        "BUTTON",
-        "Volume down",
-        push,
-        48,
-        580,
-        36,
-        36,
-        ID_BTN_VOL_DOWN,
-    );
-    let lbl_volume = mk_ctrl(
-        "STATIC",
-        "Volume 0%",
-        SS_CENTER | SS_NOPREFIX,
-        88,
-        588,
-        112,
-        20,
-        0,
-    );
-    let btn_vol_up = mk_ctrl("BUTTON", "Volume up", push, 204, 580, 36, 36, ID_BTN_VOL_UP);
-    let btn_speed_down = mk_ctrl(
-        "BUTTON",
-        "Slower",
-        push,
-        368,
-        580,
-        36,
-        36,
-        ID_BTN_SPEED_DOWN,
-    );
-    let lbl_speed = mk_ctrl(
-        "STATIC",
-        "Speed 1.00×",
-        SS_CENTER | SS_NOPREFIX,
-        408,
-        588,
-        112,
-        20,
-        0,
-    );
-    let btn_speed_up = mk_ctrl("BUTTON", "Faster", push, 524, 580, 36, 36, ID_BTN_SPEED_UP);
-
-    // Behavior card: (600, 480) to (1136, 632).
-    mk_section("Behavior", 624, 496, 200);
-    let chk_fullscreen = mk_ctrl(
-        "BUTTON",
-        "Pause while a full-screen app is open",
-        check,
-        624,
-        528,
-        488,
-        24,
-        ID_CHK_FULLSCREEN,
-    );
-    let chk_battery = mk_ctrl(
-        "BUTTON",
-        "Pause on battery power",
-        check,
-        624,
-        552,
-        488,
-        24,
-        ID_CHK_BATTERY,
-    );
-    let chk_startup = mk_ctrl(
-        "BUTTON",
-        "Start Auralis when I sign in",
-        check,
-        624,
-        576,
-        488,
-        24,
-        ID_CHK_STARTUP,
-    );
-    let chk_reduce_motion = mk_ctrl(
-        "BUTTON",
-        "Reduce motion",
-        check,
-        624,
-        600,
-        488,
-        24,
-        ID_CHK_REDUCE_MOTION,
-    );
-
-    // Status card: (24, 648) to (1136, 724).
-    let lbl_status = mk_ctrl(
-        "STATIC",
-        "Wallpaper engine starting",
-        SS_NOPREFIX,
-        48,
-        660,
-        720,
-        20,
-        0,
-    );
-    if !lbl_status.is_null() {
-        // SAFETY: Applies the long-lived section font to the valid status headline control.
-        unsafe { SendMessageW(lbl_status, WM_SETFONT, hsection_font as WPARAM, 1) };
+        created.push((ctrl, spec));
     }
-    let lbl_status_details = mk_ctrl("STATIC", "", SS_NOPREFIX, 48, 680, 720, 40, 0);
-    secondary_labels.push(lbl_status_details);
-    mk_ctrl(
-        "BUTTON",
-        "Hide to tray",
-        push,
-        784,
-        668,
-        144,
-        36,
-        ID_BTN_HIDE,
-    );
-    mk_ctrl(
-        "BUTTON",
-        "Quit and restore desktop",
-        push,
-        936,
-        668,
-        176,
-        36,
-        ID_BTN_QUIT,
-    );
 
+    let mut combo = std::ptr::null_mut();
     let mut labels = Vec::new();
     GUI_STATE.with(|cell| {
         if let Ok(mut guard) = cell.try_borrow_mut() {
             if let Some(state) = guard.as_mut() {
-                state.cmb_display = cmb_display;
-                state.edt_path = edt_path;
-                state.btn_apply = btn_apply;
-                state.btn_next_recent = btn_next_recent;
-                state.btn_stop = btn_stop;
-                state.btn_preview = btn_preview;
-                state.btn_stop_preview = btn_stop_preview;
-                state.btn_vol_down = btn_vol_down;
-                state.btn_vol_up = btn_vol_up;
-                state.btn_speed_down = btn_speed_down;
-                state.btn_speed_up = btn_speed_up;
-                state.chk_mute = chk_mute;
-                state.chk_loop = chk_loop;
-                state.lbl_volume = lbl_volume;
-                state.lbl_speed = lbl_speed;
-                state.btn_pause_resume = btn_pause_resume;
-                state.btn_aspect = btn_aspect;
-                state.chk_fullscreen = chk_fullscreen;
-                state.chk_battery = chk_battery;
-                state.chk_startup = chk_startup;
-                state.chk_reduce_motion = chk_reduce_motion;
-                state.hwnd_preview = hwnd_preview;
-                state.lbl_preview_empty = lbl_preview_empty;
-                state.lbl_status = lbl_status;
-                state.lbl_status_details = lbl_status_details;
-                state.secondary_labels = secondary_labels;
+                for (hwnd, spec) in &created {
+                    assign_slot(state, spec.slot, *hwnd);
+                }
+                state.secondary_labels = created
+                    .iter()
+                    .filter(|(_, spec)| spec.secondary)
+                    .map(|(hwnd, _)| *hwnd)
+                    .collect();
+                state.controls = created;
+                combo = state.cmb_display;
                 labels = build_display_combo_labels(state);
             }
         }
     });
-    apply_display_combo_labels(cmb_display, &labels);
+    apply_display_combo_labels(combo, &labels);
+}
+
+/// Move every child control to its layout rectangle at `scale` and give it the current fonts.
+fn layout_controls(controls: &[(HWND, &'static ControlSpec)], scale: f32, fonts: StudioFonts) {
+    for (hwnd, spec) in controls {
+        let (x, y, width, height) = scale_rect(spec.rect, scale);
+        let font = font_for(spec.font, fonts.ui, fonts.section);
+        // SAFETY: Each handle is a live child of the Studio window; SetWindowPos only moves it
+        // and WM_SETFONT swaps in a font that outlives the control.
+        unsafe {
+            SetWindowPos(
+                *hwnd,
+                std::ptr::null_mut(),
+                x,
+                y,
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            SendMessageW(*hwnd, WM_SETFONT, font as WPARAM, 1);
+        }
+        if spec.id == ID_CMB_DISPLAY {
+            let item_height = scale_px(DISPLAY_ITEM_HEIGHT, scale) as LPARAM;
+            // SAFETY: CB_SETITEMHEIGHT resizes the closed field (-1) and the list rows (0) of
+            // the owner-drawn display selector.
+            unsafe {
+                SendMessageW(*hwnd, CB_SETITEMHEIGHT, usize::MAX, item_height);
+                SendMessageW(*hwnd, CB_SETITEMHEIGHT, 0, item_height);
+            }
+        }
+    }
+}
+
+/// Rebuild fonts and child layout for `new_dpi` (from `WM_DPICHANGED` or after creation).
+fn apply_studio_dpi(hwnd: HWND, new_dpi: u32) {
+    let new_dpi = new_dpi.max(96);
+    let fonts = create_studio_fonts(new_dpi);
+    let swapped = GUI_STATE.with(|cell| {
+        let Ok(mut guard) = cell.try_borrow_mut() else {
+            return None;
+        };
+        let state = guard.as_mut()?;
+        let old = StudioFonts {
+            ui: state.ui_font,
+            section: state.section_font,
+            heading: state.heading_font,
+        };
+        state.ui_font = fonts.ui;
+        state.section_font = fonts.section;
+        state.heading_font = fonts.heading;
+        state.dpi = new_dpi;
+        Some((old, state.controls.clone()))
+    });
+    let Some((old_fonts, controls)) = swapped else {
+        // The state is busy or gone; keep the current fonts and discard the new set.
+        delete_studio_fonts(fonts);
+        return;
+    };
+    STUDIO_DPI.with(|cell| cell.set(new_dpi));
+    UI_FONT.with(|font| font.set(fonts.ui));
+    layout_controls(&controls, dpi_scale(new_dpi), fonts);
+    // Every control now uses the new fonts, so the previous set can be released.
+    delete_studio_fonts(old_fonts);
+    // SAFETY: Repaints the whole Studio at the new scale.
+    unsafe { windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 1) };
+}
+
+/// Resize the Studio frame so its client area is the logical layout at `dpi`, keeping the
+/// window's top-left corner.
+fn resize_frame_for_dpi(hwnd: HWND, dpi: u32) {
+    let scale = dpi_scale(dpi);
+    let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    let mut frame = RECT {
+        left: 0,
+        top: 0,
+        right: scale_px(CLIENT_WIDTH, scale),
+        bottom: scale_px(CLIENT_HEIGHT, scale),
+    };
+    let mut current: RECT = unsafe { mem::zeroed() };
+    // SAFETY: Both calls only write into the local RECT values.
+    unsafe {
+        AdjustWindowRectEx(&mut frame, style, 0, WS_EX_CONTROLPARENT);
+        GetWindowRect(hwnd, &mut current);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            current.left,
+            current.top,
+            frame.right - frame.left,
+            frame.bottom - frame.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Press the focused owner-drawn push button, as Enter does in a dialog.
+fn press_focused_button(hwnd: HWND) {
+    // SAFETY: Focus and parent queries only read window-manager state.
+    let focused = unsafe { GetFocus() };
+    if focused.is_null() || unsafe { IsChild(hwnd, focused) } == 0 {
+        return;
+    }
+    // SAFETY: Reads the control id of a live child window.
+    let id = unsafe { GetDlgCtrlID(focused) } as usize;
+    let is_push_button = CONTROL_LAYOUT.iter().any(|spec| {
+        spec.id == id && spec.class == "BUTTON" && spec.style & 0x000F == BS_PUSHBUTTON as u32
+    });
+    if is_push_button && unsafe { IsWindowEnabled(focused) } != 0 {
+        // SAFETY: BM_CLICK makes the button send its own BN_CLICKED to this window.
+        unsafe { SendMessageW(focused, BM_CLICK, 0, 0) };
+    }
+}
+
+fn save_config_now() {
+    GUI_STATE.with(|cell| {
+        if let Ok(guard) = cell.try_borrow() {
+            if let Some(state) = guard.as_ref() {
+                let _ = state.engine.config.save_to_file(&state.config_path);
+            }
+        }
+    });
+}
+
+/// Re-layer wallpapers whose desktop host was lost (Explorer restarted) and refresh the UI.
+fn recover_wallpaper_hosts() {
+    let outcome = GUI_STATE.with(|cell| {
+        let Ok(mut guard) = cell.try_borrow_mut() else {
+            return None;
+        };
+        let state = guard.as_mut()?;
+        let outcome = state.engine.recover_detached_wallpaper_hosts();
+        if outcome.rebuilt > 0 {
+            state.engine.trim_working_set();
+        }
+        Some(outcome)
+    });
+    if outcome.is_some_and(|o| o.rebuilt > 0 || o.pending > 0) {
+        sync_controls_from_state();
+        update_status_readout();
+    }
 }
 fn start_in_app_preview(path: PathBuf) {
     let (hwnd_preview, existing_player) = GUI_STATE.with(|cell| {
@@ -2842,7 +3531,7 @@ fn browse_video_file(owner: HWND) -> Option<PathBuf> {
         "Supported Video Files (*.mp4;*.mov;*.mkv;*.webm;*.m4v)\0*.mp4;*.mov;*.mkv;*.webm;*.m4v\0All Files (*.*)\0*.*\0\0"
             .encode_utf16()
             .collect();
-    let title = wide_string("Select Live Wallpaper Video");
+    let title = wide_string("Choose a video for Auralis");
 
     // SAFETY: OPENFILENAMEW is a plain C struct initialized with valid pointers for GetOpenFileNameW.
     let mut ofn: OPENFILENAMEW = unsafe { mem::zeroed() };
@@ -3234,7 +3923,61 @@ fn playback_controls_enabled(state: Option<&PlaybackState>) -> bool {
     )
 }
 
+/// "On this display" readout lines: the file name (never the full path) and a line with the
+/// video resolution and playback state of the selected display.
+fn display_readout(
+    state: Option<&PlaybackState>,
+    resolution: Option<(u32, u32)>,
+    host_rebuild_pending: bool,
+) -> (String, String) {
+    let file_name = |path: &Path| {
+        path.file_name().map_or_else(
+            || "Untitled video".to_string(),
+            |name| name.to_string_lossy().to_string(),
+        )
+    };
+    let with_resolution = |label: &str| match resolution {
+        Some((width, height)) => {
+            format!("{width} \u{d7} {height}, {}", label.to_lowercase())
+        }
+        None => label.to_string(),
+    };
+    match state {
+        Some(
+            PlaybackState::Playing { path, .. }
+            | PlaybackState::Paused { path, .. }
+            | PlaybackState::Loading { path },
+        ) if host_rebuild_pending => (
+            file_name(path),
+            "Waiting for the desktop to come back, then it resumes".to_string(),
+        ),
+        Some(PlaybackState::Playing { path, .. }) => (file_name(path), with_resolution("Playing")),
+        Some(PlaybackState::Paused { path, .. }) => (file_name(path), with_resolution("Paused")),
+        Some(PlaybackState::Loading { path }) => (file_name(path), "Loading".to_string()),
+        Some(PlaybackState::Stopped { path }) => (file_name(path), "Stopped".to_string()),
+        Some(PlaybackState::Failed { path, .. }) => (
+            file_name(path),
+            "Could not play this video. Choose another file and set it again.".to_string(),
+        ),
+        Some(PlaybackState::Unloaded) | None => (
+            "No wallpaper".to_string(),
+            "Choose a video, then select Set as wallpaper".to_string(),
+        ),
+    }
+}
+
+/// Update a static label only when its text changed, avoiding needless repaints.
+fn set_label_if_changed(hwnd: HWND, text: &str) {
+    if hwnd.is_null() || read_edit_text(hwnd) == text {
+        return;
+    }
+    let wide = wide_string(text);
+    // SAFETY: hwnd is a live STATIC child; the text is updated outside any GUI_STATE borrow.
+    unsafe { SetWindowTextW(hwnd, wide.as_ptr()) };
+}
+
 fn update_status_readout() {
+    let mut readout_target: Option<(HWND, String, HWND, String)> = None;
     let update_target: Option<(HWND, String, HWND, String, HWND, &'static str)> = GUI_STATE.with(|cell| {
         let Ok(mut guard) = cell.try_borrow_mut() else {
             return None;
@@ -3244,6 +3987,15 @@ fn update_status_readout() {
         let display_id = selected_display_id(state);
         let playback_state = state.engine.controller(&display_id).map(|c| &c.state);
         let state_desc = playback_status_caption(playback_state);
+        let (now_file, now_meta) = display_readout(
+            playback_state,
+            state
+                .engine
+                .video_telemetry(&display_id)
+                .and_then(|telemetry| telemetry.native_resolution),
+            state.engine.host_rebuild_pending(&display_id),
+        );
+        readout_target = Some((state.lbl_now_file, now_file, state.lbl_now_meta, now_meta));
 
         let host_desc = if state.engine.host_window(&display_id).is_some() {
             "Desktop surface ready"
@@ -3335,6 +4087,10 @@ fn update_status_readout() {
         }
     });
 
+    if let Some((file_hwnd, file_text, meta_hwnd, meta_text)) = readout_target {
+        set_label_if_changed(file_hwnd, &file_text);
+        set_label_if_changed(meta_hwnd, &meta_text);
+    }
     if let Some((lbl_hwnd, status_line, details_hwnd, details, pause_button, pause_label)) =
         update_target
     {
@@ -3412,19 +4168,171 @@ mod tests {
 
     #[test]
     fn brand_icon_is_a_contrasting_32_bit_monochrome_mark() {
-        let (pixels, mask) = brand_icon_pixels();
+        let (pixels, mask) = brand_icon_pixels(32);
         assert_eq!(pixels.len(), 32 * 32 * 4);
         assert_eq!(mask.len(), 32 * 4);
-        assert!(pixels.iter().step_by(4).any(|shade| *shade == 242));
-        assert!(pixels.iter().step_by(4).any(|shade| *shade == 24));
+        // Byte 0 of each BGRA pixel is blue.
+        let [.., tile] = crate::brand::TILE_COLOR;
+        let [.., ink] = crate::brand::MARK_COLOR;
+        assert!(pixels.iter().step_by(4).any(|shade| *shade == ink));
+        assert!(pixels.iter().step_by(4).any(|shade| *shade == tile));
         assert!(pixels.iter().skip(3).step_by(4).any(|alpha| *alpha == 0));
     }
 
     #[test]
-    fn icon_vector_distance_handles_zero_length_segments() {
-        assert!(
-            (point_segment_distance((2.0, 3.0), (1.0, 1.0), (1.0, 1.0)) - 2.236068).abs() < 0.001
+    fn layout_rectangles_scale_with_dpi() {
+        assert_eq!(
+            scale_rect((624, 356, 488, 44), dpi_scale(96)),
+            (624, 356, 488, 44)
         );
+        assert_eq!(
+            scale_rect((624, 356, 488, 44), dpi_scale(144)),
+            (936, 534, 732, 66)
+        );
+        assert_eq!(
+            scale_rect((48, 72, 200, 24), dpi_scale(120)),
+            (60, 90, 250, 30)
+        );
+        // Sub-96 values never shrink the layout below its logical size.
+        assert!((dpi_scale(72) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn font_heights_follow_point_size_and_dpi() {
+        assert_eq!(font_height(11, 96), -14);
+        assert_eq!(font_height(11, 144), -22);
+        assert_eq!(font_height(14, 192), -37);
+    }
+
+    fn card_of(rect: LogicalRect) -> Option<usize> {
+        let (x, y, width, height) = rect;
+        CARD_RECTS.iter().position(|&(left, top, right, bottom)| {
+            x >= left && y >= top && x + width <= right && y + height <= bottom
+        })
+    }
+
+    #[test]
+    fn every_control_sits_inside_one_card() {
+        for spec in CONTROL_LAYOUT {
+            assert!(
+                card_of(spec.rect).is_some(),
+                "{:?} ({}) is outside every card",
+                spec.slot,
+                spec.text
+            );
+        }
+    }
+
+    #[test]
+    fn tab_order_follows_the_visual_order() {
+        let stops: Vec<&ControlSpec> = CONTROL_LAYOUT
+            .iter()
+            .filter(|spec| spec.style & WS_TABSTOP != 0)
+            .collect();
+        assert!(stops.len() > 20);
+        for pair in stops.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let (card_a, card_b) = (card_of(a.rect).unwrap(), card_of(b.rect).unwrap());
+            assert!(
+                card_b >= card_a,
+                "{:?} -> {:?} goes back a card",
+                a.slot,
+                b.slot
+            );
+            if card_a == card_b {
+                let a_bottom = a.rect.1 + a.rect.3;
+                let next_row = b.rect.1 >= a_bottom;
+                let same_row_right = b.rect.1 < a_bottom && b.rect.0 > a.rect.0;
+                assert!(
+                    next_row || same_row_right,
+                    "{:?} -> {:?} is not top-to-bottom, left-to-right",
+                    a.slot,
+                    b.slot
+                );
+            }
+        }
+        // Preview actions come first and the quit action is last.
+        assert_eq!(stops.first().unwrap().id, ID_BTN_PREVIEW);
+        assert_eq!(stops.last().unwrap().id, ID_BTN_QUIT);
+    }
+
+    #[test]
+    fn display_readout_sits_between_the_drop_hint_and_the_apply_button() {
+        let rect_of = |slot: Slot| {
+            CONTROL_LAYOUT
+                .iter()
+                .find(|spec| spec.slot == slot)
+                .unwrap()
+                .rect
+        };
+        let apply = rect_of(Slot::BtnApply);
+        let meta = rect_of(Slot::NowMeta);
+        let file = rect_of(Slot::NowFile);
+        assert!(file.1 >= 260 && file.1 + file.3 <= meta.1);
+        assert!(meta.1 + meta.3 + 8 <= apply.1);
+        // Layout positions stay on the 4px grid.
+        for spec in CONTROL_LAYOUT {
+            assert_eq!(spec.rect.1 % 4, 0, "{:?} is off the 4px grid", spec.slot);
+        }
+    }
+
+    #[test]
+    fn display_readout_shows_file_name_resolution_and_state() {
+        let path = PathBuf::from(r"C:\private\clips\ocean.mp4");
+        assert_eq!(
+            display_readout(
+                Some(&PlaybackState::Playing {
+                    path: path.clone(),
+                    position_secs: 3.0,
+                }),
+                Some((3840, 2160)),
+                false
+            ),
+            (
+                "ocean.mp4".to_string(),
+                "3840 \u{d7} 2160, playing".to_string()
+            )
+        );
+        assert_eq!(
+            display_readout(
+                Some(&PlaybackState::Paused {
+                    path: path.clone(),
+                    position_secs: 3.0,
+                }),
+                None,
+                false
+            )
+            .1,
+            "Paused"
+        );
+        assert_eq!(
+            display_readout(
+                Some(&PlaybackState::Stopped { path: path.clone() }),
+                None,
+                false
+            ),
+            ("ocean.mp4".to_string(), "Stopped".to_string())
+        );
+        assert_eq!(display_readout(None, None, false).0, "No wallpaper");
+        let waiting = display_readout(
+            Some(&PlaybackState::Playing {
+                path: path.clone(),
+                position_secs: 0.0,
+            }),
+            None,
+            true,
+        );
+        assert!(waiting.1.starts_with("Waiting for the desktop"));
+        let failed = display_readout(
+            Some(&PlaybackState::Failed {
+                path,
+                error: "decoder".to_string(),
+            }),
+            None,
+            false,
+        );
+        assert!(!failed.0.contains('\\'));
+        assert!(failed.1.contains("Choose another file"));
     }
 
     #[test]

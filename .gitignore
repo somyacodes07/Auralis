@@ -31,3 +31,8 @@ ehthumbs.db
 .env
 .env.*
 !.env.example
+
+# Local packaging output (installer/zip builds)
+/dist/
+# Python bytecode from asset scripts
+__pycache__/

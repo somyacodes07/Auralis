@@ -51,6 +51,10 @@ jobs:
       - name: Build Release Binary
         run: cargo build --workspace --release --all-features --locked
 
+      - name: Verify executable icon and version information
+        shell: pwsh
+        run: ./scripts/check-exe-resources.ps1 target/release/auralis.exe
+
       - name: Package Windows Artifact
         shell: pwsh
         run: |
@@ -63,6 +67,98 @@ jobs:
           $hash = (Get-FileHash "dist/$($assetName).zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $($assetName).zip" | Out-File -Encoding ascii "dist/$($assetName).zip.sha256"
           Remove-Item -LiteralPath $packageDir -Recurse -Force
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "Inno Setup 6 is not preinstalled on this runner; installing it with Chocolatey."
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed with exit code $LASTEXITCODE" }
+          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          "ISCC=$iscc" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build Windows Installer
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json).packages[0].version
+          if (-not $version) { throw "Could not read the package version from Cargo metadata" }
+          $baseName = "auralis-$($env:ASSET_LABEL)-windows-x86_64-setup"
+          $defines = @("/DAppVersion=$version", "/DOutputBaseName=$baseName")
+          if ($env:AURALIS_BUILD_NUMBER) { $defines += "/DBuildNumber=$($env:AURALIS_BUILD_NUMBER)" }
+          & $env:ISCC /Qp @defines "/O$(Join-Path $PWD 'dist')" installer\auralis.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          $hash = (Get-FileHash "dist/$baseName.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $baseName.exe" | Out-File -Encoding ascii "dist/$baseName.exe.sha256"
+          "INSTALLER=$((Resolve-Path "dist/$baseName.exe").Path)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Get-ChildItem dist
+
+      - name: Smoke Test Installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $logDir = Join-Path $env:RUNNER_TEMP "installer-logs"
+          New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+          $appDir = Join-Path $env:LOCALAPPDATA "Programs\Auralis"
+          $exe = Join-Path $appDir "auralis.exe"
+          $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Auralis.lnk"
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $configFile = Join-Path $env:APPDATA "Auralis\auralis_config.json"
+          function Get-RunValue { (Get-ItemProperty -Path $runKey -Name Auralis -ErrorAction SilentlyContinue).Auralis }
+
+          if (Test-Path $appDir) { throw "Install directory already exists before the test: $appDir" }
+
+          Write-Host "Silent per-user install with the sign-in task selected"
+          $setup = Start-Process -FilePath $env:INSTALLER -Wait -PassThru -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/CURRENTUSER", "/NORESTART", "/TASKS=startup",
+            "/LOG=`"$(Join-Path $logDir 'install.log')`"")
+          if ($setup.ExitCode -ne 0) { throw "Installer exited with code $($setup.ExitCode)" }
+
+          foreach ($file in "auralis.exe", "unins000.exe", "LICENSE-MIT", "LICENSE-APACHE", "THIRD_PARTY_LICENSES.md") {
+            if (-not (Test-Path (Join-Path $appDir $file))) { throw "Missing installed file: $file" }
+          }
+          if (-not (Test-Path $shortcut)) { throw "Start menu shortcut missing: $shortcut" }
+          $expectedRun = "`"$exe`" gui --minimized"
+          if ((Get-RunValue) -ne $expectedRun) { throw "Run value is '$(Get-RunValue)', expected '$expectedRun'" }
+
+          & $exe status
+          if ($LASTEXITCODE -ne 0) { throw "auralis.exe status exited with code $LASTEXITCODE" }
+
+          # A silent uninstall must keep user settings.
+          $createdConfig = $false
+          if (-not (Test-Path $configFile)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $configFile) | Out-Null
+            Set-Content -Path $configFile -Value "{}" -Encoding ascii
+            $createdConfig = $true
+          }
+
+          Write-Host "Silent uninstall"
+          $uninstall = Start-Process -FilePath (Join-Path $appDir "unins000.exe") -Wait -PassThru -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG=`"$(Join-Path $logDir 'uninstall.log')`"")
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exited with code $($uninstall.ExitCode)" }
+          # The uninstaller finishes from a temporary copy of itself; wait for the folder to go.
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path $appDir) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 500 }
+
+          if (Test-Path $appDir) {
+            Get-ChildItem -Recurse $appDir | Format-Table FullName
+            throw "Install directory still exists after uninstall: $appDir"
+          }
+          if (Test-Path $shortcut) { throw "Start menu shortcut still exists after uninstall" }
+          if ($null -ne (Get-RunValue)) { throw "Run value still exists after uninstall" }
+          if (-not (Test-Path $configFile)) { throw "Silent uninstall deleted the settings file" }
+          if ($createdConfig) { Remove-Item -LiteralPath $configFile -Force }
+          Write-Host "Installer smoke test passed."
+
+      - name: Upload Installer Logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-logs
+          path: ${{ runner.temp }}/installer-logs
+          if-no-files-found: ignore
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -107,6 +203,12 @@ jobs:
           cargo build --workspace --release --all-features --locked --target aarch64-apple-darwin
           cargo build --workspace --release --all-features --locked --target x86_64-apple-darwin
 
+      - name: Install DMG Layout Tool
+        run: |
+          # create-dmg (MIT) lays out the Finder window: background, icon positions, volume icon.
+          brew install create-dmg
+          create-dmg --version
+
       - name: Package Universal DMG
         run: |
           VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")
@@ -114,7 +216,11 @@ jobs:
           ASSET_NAME="auralis-${ASSET_LABEL}-macos-universal"
           STAGE="dist/stage"
           APP_ROOT="${STAGE}/Auralis.app"
-          mkdir -p "${APP_ROOT}/Contents/MacOS" dist
+          mkdir -p "${APP_ROOT}/Contents/MacOS" "${APP_ROOT}/Contents/Resources" dist
+
+          # App icon from the committed iconset (scripts/generate_brand_assets.py).
+          iconutil -c icns assets/macos/AppIcon.iconset -o "${APP_ROOT}/Contents/Resources/Auralis.icns"
+          test -s "${APP_ROOT}/Contents/Resources/Auralis.icns"
 
           # One binary with arm64 and x86_64 slices.
           lipo -create \
@@ -135,6 +241,8 @@ jobs:
               <key>CFBundleDisplayName</key>
               <string>Auralis</string>
               <key>CFBundleExecutable</key>
+              <string>Auralis</string>
+              <key>CFBundleIconFile</key>
               <string>Auralis</string>
               <key>CFBundlePackageType</key>
               <string>APPL</string>
@@ -160,11 +268,40 @@ jobs:
           codesign --force --sign - --timestamp=none "${APP_ROOT}"
           codesign --verify --strict "${APP_ROOT}"
 
-          # Drag-to-install disk image: Auralis.app next to an Applications shortcut.
-          ln -s /Applications "${STAGE}/Applications"
-          hdiutil create -volname "Auralis" -srcfolder "${STAGE}" -fs HFS+ -format UDZO -ov \
-            "dist/${ASSET_NAME}.dmg"
+          # Drag-to-install disk image: Auralis.app on the left, an Applications link on the
+          # right, over the branded background (1x + 2x combined into one HiDPI TIFF). The icon
+          # positions match DMG_APP_X / DMG_LINK_X / DMG_ICON_Y in the asset generator.
+          # create-dmg drives Finder through AppleScript; if that fails the job fails rather
+          # than shipping an unstyled image.
+          tiffutil -cathidpicheck assets/macos/dmg-background.png assets/macos/dmg-background@2x.png \
+            -out dist/dmg-background.tiff
+          create-dmg \
+            --volname "Auralis" \
+            --volicon "${APP_ROOT}/Contents/Resources/Auralis.icns" \
+            --background dist/dmg-background.tiff \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 128 \
+            --text-size 13 \
+            --icon "Auralis.app" 160 168 \
+            --hide-extension "Auralis.app" \
+            --app-drop-link 440 168 \
+            "dist/${ASSET_NAME}.dmg" \
+            "${STAGE}"
+          rm -f dist/dmg-background.tiff
           hdiutil verify "dist/${ASSET_NAME}.dmg"
+
+          # Confirm the styled layout landed in the image: Finder view settings, background,
+          # volume icon, the app with its icon, and the Applications link.
+          MOUNT_DIR=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "${MOUNT_DIR}" "dist/${ASSET_NAME}.dmg"
+          ls -la "${MOUNT_DIR}" "${MOUNT_DIR}/.background"
+          test -f "${MOUNT_DIR}/.DS_Store"
+          test -f "${MOUNT_DIR}/.VolumeIcon.icns"
+          test -f "${MOUNT_DIR}/.background/dmg-background.tiff"
+          test -f "${MOUNT_DIR}/Auralis.app/Contents/Resources/Auralis.icns"
+          test -L "${MOUNT_DIR}/Applications"
+          hdiutil detach "${MOUNT_DIR}"
           (cd dist && shasum -a 256 "${ASSET_NAME}.dmg" > "${ASSET_NAME}.dmg.sha256")
           rm -rf "${STAGE}"
           ls -la dist

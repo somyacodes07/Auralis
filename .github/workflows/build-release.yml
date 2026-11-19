@@ -104,7 +104,8 @@ jobs:
             Formatting, Clippy, tests, and release builds passed on native Windows and macOS runners before these files were uploaded. That proves compilation and automated tests only; desktop layering and playback still need manual testing (see `docs/PLATFORM_TEST_MATRIX.md`).
 
             ### Downloads
-            - **Windows x64:** `auralis-${{ needs.meta.outputs.asset_label }}-windows-x86_64.zip`. Unzip and run `auralis.exe`.
+            - **Windows x64 installer (recommended):** `auralis-${{ needs.meta.outputs.asset_label }}-windows-x86_64-setup.exe`. Installs for your account only (no administrator rights) and adds a Start menu entry and an uninstaller. The build is not code-signed: if SmartScreen warns, choose **More info**, then **Run anyway**.
+            - **Windows x64 portable:** `auralis-${{ needs.meta.outputs.asset_label }}-windows-x86_64.zip`. Unzip anywhere and run `auralis.exe`.
             - **macOS 13+ (Apple Silicon and Intel):** `auralis-${{ needs.meta.outputs.asset_label }}-macos-universal.dmg`. Open it and drag **Auralis** into **Applications**. The app is not notarized: on first launch, Control-click it in Applications, choose **Open**, then **Open** again (or allow it in System Settings, Privacy & Security).
             - Each file has a matching `.sha256` checksum.
 
