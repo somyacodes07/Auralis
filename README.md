@@ -173,4 +173,15 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for the engin
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Dependency licenses are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+Copyright © 2026 Somyajeet Singh.
+
+Auralis is dual-licensed under either of
+
+- the [MIT License](LICENSE-MIT), or
+- the [Apache License, Version 2.0](LICENSE-APACHE),
+
+at your option. (GitHub's sidebar shows only Apache-2.0 because it detects one license file; both apply.)
+
+Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in Auralis, as defined in the Apache-2.0 license, is dual-licensed as above, without any additional terms or conditions.
+
+Every build ships both license texts and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), the inventory of dependency licenses (all MIT, Apache-2.0, Unicode-3.0, or Unlicense, enforced in CI by `cargo deny`): next to `auralis.exe` on Windows and in `Auralis.app/Contents/Resources` on macOS.

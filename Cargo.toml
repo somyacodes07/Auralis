@@ -2,11 +2,14 @@
 name = "auralis"
 version = "1.0.0-rc.1"
 edition = "2021"
-authors = ["somyacodes07 <ffsomyajeet@gmail.com>"]
-description = "A premium, Rust-first live wallpaper application for macOS and Windows"
+authors = ["Somyajeet Singh <ffsomyajeet@gmail.com>"]
+description = "Live video wallpapers for Windows and macOS, with native playback behind your desktop icons"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/somyacodes07/Auralis"
+homepage = "https://somyacodes07.github.io/Auralis/"
+keywords = ["wallpaper", "live-wallpaper", "video", "desktop", "macos"]
+categories = ["multimedia::video", "gui"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
