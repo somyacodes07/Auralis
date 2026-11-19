@@ -29,6 +29,39 @@ pub struct WallpaperEngine {
     user_paused: HashSet<String>,
     /// Whether the system is currently in OS sleep state.
     system_sleeping: bool,
+    /// Wallpapers whose desktop host was lost (for example when the desktop shell restarted)
+    /// and still have to be re-created.
+    pending_host_rebuild: Vec<PendingHostRebuild>,
+}
+
+/// A wallpaper that lost its desktop host and is waiting to be layered again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingHostRebuild {
+    display_id: String,
+    media_path: PathBuf,
+    user_paused: bool,
+}
+
+/// Media path of a wallpaper that should come back after its host is rebuilt.
+fn playback_media_path(state: &crate::media::PlaybackState) -> Option<PathBuf> {
+    use crate::media::PlaybackState;
+    match state {
+        PlaybackState::Loading { path }
+        | PlaybackState::Playing { path, .. }
+        | PlaybackState::Paused { path, .. } => Some(path.clone()),
+        PlaybackState::Stopped { .. } | PlaybackState::Failed { .. } | PlaybackState::Unloaded => {
+            None
+        }
+    }
+}
+
+/// Outcome of [`WallpaperEngine::recover_detached_wallpaper_hosts`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostRecovery {
+    /// Wallpapers whose host was re-created and whose playback restarted.
+    pub rebuilt: usize,
+    /// Wallpapers still waiting for a desktop layer; call the recovery again later.
+    pub pending: usize,
 }
 
 impl WallpaperEngine {
@@ -45,6 +78,7 @@ impl WallpaperEngine {
             host_windows: HashMap::new(),
             user_paused: HashSet::new(),
             system_sleeping: false,
+            pending_host_rebuild: Vec::new(),
         };
         engine.refresh_displays()?;
         Ok(engine)
@@ -180,6 +214,8 @@ impl WallpaperEngine {
         self.adapter.trim_working_set();
 
         self.user_paused.remove(display_id);
+        self.pending_host_rebuild
+            .retain(|pending| pending.display_id != display_id);
 
         // Record validated configuration and recent wallpapers library
         if let Ok(mut display_cfg) = DisplayWallpaperConfig::new(media_path.clone()) {
@@ -298,6 +334,8 @@ impl WallpaperEngine {
     /// Stop wallpaper playback and clear the host window on the specified display.
     pub fn stop_display(&mut self, display_id: &str) -> Result<(), PlatformError> {
         self.user_paused.remove(display_id);
+        self.pending_host_rebuild
+            .retain(|pending| pending.display_id != display_id);
         if let Some(controller) = self.controllers.get_mut(display_id) {
             controller.stop();
         }
@@ -588,11 +626,85 @@ impl WallpaperEngine {
     /// Return true if at least one display has an active wallpaper host window.
     #[must_use]
     pub fn has_active_wallpaper(&self) -> bool {
-        !self.host_windows.is_empty()
+        !self.host_windows.is_empty() || !self.pending_host_rebuild.is_empty()
+    }
+
+    /// Whether the wallpaper on `display_id` lost its desktop host and is waiting to be rebuilt.
+    #[must_use]
+    pub fn host_rebuild_pending(&self, display_id: &str) -> bool {
+        self.pending_host_rebuild
+            .iter()
+            .any(|pending| pending.display_id == display_id)
+    }
+
+    /// Re-create wallpaper hosts that are no longer layered inside the desktop shell.
+    ///
+    /// When the desktop shell restarts (for example Windows Explorer after a crash or a
+    /// `taskkill`), the layer that held each host window is destroyed with it. This detects
+    /// such hosts through the platform adapter, releases them, and starts the same video again
+    /// in a new host. A wallpaper the user had paused is paused again after it is rebuilt.
+    /// Displays whose new desktop layer is not available yet stay pending, so callers can
+    /// retry until [`HostRecovery::pending`] is zero.
+    pub fn recover_detached_wallpaper_hosts(&mut self) -> HostRecovery {
+        let hosts: Vec<(String, isize)> = self
+            .host_windows
+            .iter()
+            .map(|(id, hwnd)| (id.clone(), *hwnd))
+            .collect();
+        for (display_id, hwnd) in hosts {
+            if self.adapter.is_wallpaper_host_attached(hwnd) {
+                continue;
+            }
+            self.host_windows.remove(&display_id);
+            let _ = self.adapter.destroy_wallpaper_host_window(hwnd);
+            let media_path = self
+                .controllers
+                .get(&display_id)
+                .and_then(|controller| playback_media_path(&controller.state))
+                .or_else(|| {
+                    self.config
+                        .per_display
+                        .get(&display_id)
+                        .map(|cfg| cfg.media_path.clone())
+                });
+            let Some(media_path) = media_path else {
+                continue;
+            };
+            let user_paused = self.user_paused.contains(&display_id);
+            self.pending_host_rebuild
+                .retain(|pending| pending.display_id != display_id);
+            self.pending_host_rebuild.push(PendingHostRebuild {
+                display_id,
+                media_path,
+                user_paused,
+            });
+        }
+
+        let mut outcome = HostRecovery::default();
+        for pending in std::mem::take(&mut self.pending_host_rebuild) {
+            if !self.displays.iter().any(|d| d.id == pending.display_id) {
+                continue;
+            }
+            match self.apply_wallpaper(&pending.display_id, pending.media_path.clone()) {
+                Ok(()) => {
+                    if pending.user_paused {
+                        let _ = self.pause_display(&pending.display_id);
+                    }
+                    outcome.rebuilt += 1;
+                }
+                Err(_) => self.pending_host_rebuild.push(pending),
+            }
+        }
+        outcome.pending = self.pending_host_rebuild.len();
+        if outcome.rebuilt > 0 {
+            let _ = self.evaluate_policy();
+        }
+        outcome
     }
 
     /// Cleanly stop all playback controllers and destroy all native wallpaper host windows.
     pub fn shutdown(&mut self) {
+        self.pending_host_rebuild.clear();
         for controller in self.controllers.values_mut() {
             controller.stop();
         }
@@ -948,5 +1060,174 @@ mod tests {
 
         let _ = std::fs::remove_file(v1);
         let _ = std::fs::remove_file(v2);
+    }
+
+    /// Adapter whose desktop layer can be "restarted" to simulate a shell restart.
+    struct ShellRestartAdapter {
+        /// Host handles that are still attached to the current desktop layer.
+        attached: Arc<std::sync::Mutex<HashSet<isize>>>,
+        /// When false, creating a host fails because the new desktop layer is not ready.
+        shell_ready: Arc<AtomicBool>,
+        next_handle: AtomicUsize,
+        destroyed: Arc<AtomicUsize>,
+    }
+
+    impl PlatformAdapter for ShellRestartAdapter {
+        fn enumerate_displays(&self) -> Result<Vec<DisplayInfo>, PlatformError> {
+            Ok(vec![DisplayInfo {
+                id: "DISPLAY_1".to_string(),
+                name: "Primary Monitor".to_string(),
+                left: 0,
+                top: 0,
+                width: 1920,
+                height: 1080,
+                is_primary: true,
+            }])
+        }
+
+        fn query_power_status(&self) -> Result<PowerStatus, PlatformError> {
+            Ok(PowerStatus::OnAcPower)
+        }
+
+        fn is_display_occluded_by_fullscreen(&self, _display: &DisplayInfo) -> bool {
+            false
+        }
+
+        fn create_wallpaper_host_window(
+            &mut self,
+            _display: &DisplayInfo,
+        ) -> Result<isize, PlatformError> {
+            if !self.shell_ready.load(Ordering::SeqCst) {
+                return Err(PlatformError::DesktopWindowNotFound);
+            }
+            let handle = (self.next_handle.fetch_add(1, Ordering::SeqCst) + 500) as isize;
+            self.attached.lock().unwrap().insert(handle);
+            Ok(handle)
+        }
+
+        fn destroy_wallpaper_host_window(
+            &mut self,
+            window_hwnd: isize,
+        ) -> Result<(), PlatformError> {
+            self.attached.lock().unwrap().remove(&window_hwnd);
+            self.destroyed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_wallpaper_host_attached(&mut self, window_hwnd: isize) -> bool {
+            self.attached.lock().unwrap().contains(&window_hwnd)
+        }
+
+        fn attach_to_desktop(
+            &mut self,
+            _display_id: &str,
+            _window_hwnd: isize,
+        ) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn detach_from_desktop(
+            &mut self,
+            _display_id: &str,
+            _window_hwnd: isize,
+        ) -> Result<(), PlatformError> {
+            Ok(())
+        }
+    }
+
+    fn shell_restart_engine(
+        attached: &Arc<std::sync::Mutex<HashSet<isize>>>,
+        shell_ready: &Arc<AtomicBool>,
+        destroyed: &Arc<AtomicUsize>,
+    ) -> WallpaperEngine {
+        WallpaperEngine::new(
+            AppConfig::default(),
+            Box::new(ShellRestartAdapter {
+                attached: attached.clone(),
+                shell_ready: shell_ready.clone(),
+                next_handle: AtomicUsize::new(0),
+                destroyed: destroyed.clone(),
+            }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn shell_restart_rebuilds_lost_hosts_and_keeps_user_pause() {
+        let attached = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let shell_ready = Arc::new(AtomicBool::new(true));
+        let destroyed = Arc::new(AtomicUsize::new(0));
+        let mut engine = shell_restart_engine(&attached, &shell_ready, &destroyed);
+        let video = create_temp_video("engine_shell_restart.mp4");
+        engine.apply_wallpaper("DISPLAY_1", video.clone()).unwrap();
+        engine.pause_display("DISPLAY_1").unwrap();
+        let original = engine.host_window("DISPLAY_1").unwrap();
+
+        // Nothing happens while the host is still layered in the desktop.
+        assert_eq!(
+            engine.recover_detached_wallpaper_hosts(),
+            HostRecovery::default()
+        );
+        assert_eq!(engine.host_window("DISPLAY_1"), Some(original));
+
+        // The shell goes away and is not ready yet: the wallpaper stays pending, not lost.
+        attached.lock().unwrap().clear();
+        shell_ready.store(false, Ordering::SeqCst);
+        let waiting = engine.recover_detached_wallpaper_hosts();
+        assert_eq!(
+            waiting,
+            HostRecovery {
+                rebuilt: 0,
+                pending: 1
+            }
+        );
+        assert!(engine.host_rebuild_pending("DISPLAY_1"));
+        assert!(engine.host_window("DISPLAY_1").is_none());
+        assert!(engine.has_active_wallpaper());
+        assert_eq!(destroyed.load(Ordering::SeqCst), 1);
+
+        // The new desktop layer appears: the same video is hosted again and stays paused.
+        shell_ready.store(true, Ordering::SeqCst);
+        let recovered = engine.recover_detached_wallpaper_hosts();
+        assert_eq!(
+            recovered,
+            HostRecovery {
+                rebuilt: 1,
+                pending: 0
+            }
+        );
+        assert!(!engine.host_rebuild_pending("DISPLAY_1"));
+        let rebuilt = engine.host_window("DISPLAY_1").unwrap();
+        assert_ne!(rebuilt, original);
+        assert!(matches!(
+            &engine.controller("DISPLAY_1").unwrap().state,
+            PlaybackState::Paused { path, .. } if *path == video
+        ));
+
+        engine.shutdown();
+        let _ = std::fs::remove_file(video);
+    }
+
+    #[test]
+    fn stopping_a_display_cancels_a_pending_host_rebuild() {
+        let attached = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let shell_ready = Arc::new(AtomicBool::new(true));
+        let destroyed = Arc::new(AtomicUsize::new(0));
+        let mut engine = shell_restart_engine(&attached, &shell_ready, &destroyed);
+        let video = create_temp_video("engine_shell_restart_stop.mp4");
+        engine.apply_wallpaper("DISPLAY_1", video.clone()).unwrap();
+        attached.lock().unwrap().clear();
+        shell_ready.store(false, Ordering::SeqCst);
+        assert_eq!(engine.recover_detached_wallpaper_hosts().pending, 1);
+
+        engine.stop_display("DISPLAY_1").unwrap();
+        assert!(!engine.has_active_wallpaper());
+        shell_ready.store(true, Ordering::SeqCst);
+        assert_eq!(
+            engine.recover_detached_wallpaper_hosts(),
+            HostRecovery::default()
+        );
+        assert!(engine.host_window("DISPLAY_1").is_none());
+        let _ = std::fs::remove_file(video);
     }
 }

@@ -4,7 +4,7 @@ GitHub Actions compile and test the Rust and native bridge code on native Window
 
 | Platform | Automated CI | Manual acceptance still required |
 | --- | --- | --- |
-| Windows x64 | `fmt`, Clippy, tests, release build; interactive runner may exercise host lifecycle | Launch Auralis, select a real local video, confirm desktop icons and ordinary windows remain above the wallpaper, verify multi-display placement, tray restore/quit, pause/mute/loop, sleep/wake, and display reconnect. |
+| Windows x64 | `fmt`, Clippy, tests, release build; interactive runner may exercise host lifecycle | Launch Auralis, select a real local video, confirm desktop icons and ordinary windows remain above the wallpaper, verify multi-display placement, tray restore/quit, pause/mute/loop, sleep/wake, and display reconnect. Restart Explorer (`taskkill /f /im explorer.exe` then `start explorer.exe`) and confirm the wallpaper and tray icon return; check Tab/Shift+Tab/Space/Enter in the Studio; move the Studio to a monitor with a different scale factor; run `auralis quit`. |
 | macOS | `fmt`, Clippy, tests, release build; `build.rs` compiles and links the AppKit/AVFoundation bridge | Launch the `.app`, choose a local video, verify the image sits behind desktop icons and normal windows across Spaces, confirm multi-display placement and removal, test recent cycling, audio, pause, sleep/wake, resolution change, Launch at Login toggle, and quit. |
 
 Record OS version, device model, display layout, video codec/profile/resolution/frame rate, and any known failures with the test result. Do not infer desktop behavior from compilation alone.

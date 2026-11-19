@@ -46,6 +46,9 @@ cargo run --release
 
 # Verify native wallpaper host creation and cleanup (not visual layering)
 .\target\release\auralis.exe verify-desktop
+
+# Quit a running Studio and restore the desktop (exits 0 if none is running; used by installers)
+.\target\release\auralis.exe quit
 ```
 
 ## Quality Gates & Local Verification
