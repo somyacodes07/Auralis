@@ -5,7 +5,7 @@ on:
     tags:
       - 'v*'
       # Automated main-branch builds (build-release.yml) are published there, not here.
-      - '!v*\+build.*'
+      - '!v*-build.*'
 
 permissions:
   contents: read

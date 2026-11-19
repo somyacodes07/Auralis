@@ -3,9 +3,10 @@ name: Build Release
 # Every push to the default branch (normally a merged pull request) is built on native Windows
 # and macOS runners and published as a numbered GitHub prerelease.
 #
-# Tag format: v<Cargo.toml version>+build.<N>, for example v0.2.0-beta.1+build.42.
-# <N> is this workflow's run number, so it increases with every build. The "+build.N" part is
-# SemVer build metadata: the version itself still matches Cargo.toml exactly.
+# Tag format: v<Cargo.toml version>-build.<N>, for example v0.2.0-beta.1-build.42.
+# <N> is this workflow's run number, so it increases with every build. The tag avoids "+"
+# (GitHub shows it as %2B in release URLs). Inside the app the version reads
+# 0.2.0-beta.1+build.42 (SemVer build metadata); Cargo.toml is never changed per build.
 #
 # These are unsigned test builds. Maintainer releases still come from pushing a plain
 # v<version> tag, which release.yml turns into a reviewed draft release.
@@ -56,10 +57,10 @@ jobs:
           {
             echo "version=$VERSION"
             echo "build_number=$BUILD_NUMBER"
-            echo "tag=v${VERSION}+build.${BUILD_NUMBER}"
+            echo "tag=v${VERSION}-build.${BUILD_NUMBER}"
             echo "asset_label=v${VERSION}-build.${BUILD_NUMBER}"
           } >> "$GITHUB_OUTPUT"
-          echo "Build tag: v${VERSION}+build.${BUILD_NUMBER}"
+          echo "Build tag: v${VERSION}-build.${BUILD_NUMBER}"
 
   package:
     name: Build & Package
@@ -93,20 +94,43 @@ jobs:
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: Auralis ${{ needs.meta.outputs.version }} (build ${{ needs.meta.outputs.build_number }})
+          name: Auralis ${{ needs.meta.outputs.version }} · Build ${{ needs.meta.outputs.build_number }}
           prerelease: true
           make_latest: false
+          generate_release_notes: true
           files: final-dist/*
           fail_on_unmatched_files: true
           body: |
-            Automated build **${{ needs.meta.outputs.build_number }}** of Auralis `${{ needs.meta.outputs.version }}`, built from `${{ github.sha }}` on `${{ github.ref_name }}`.
+            Live video wallpaper for Windows and macOS. Test build **${{ needs.meta.outputs.build_number }}** of `${{ needs.meta.outputs.version }}`, built from ${{ github.sha }}.
 
-            Formatting, Clippy, tests, and release builds passed on native Windows and macOS runners before these files were uploaded. That proves compilation and automated tests only; desktop layering and playback still need manual testing (see `docs/PLATFORM_TEST_MATRIX.md`).
+            ## Download
 
-            ### Downloads
-            - **Windows x64 installer (recommended):** `auralis-${{ needs.meta.outputs.asset_label }}-windows-x86_64-setup.exe`. Installs for your account only (no administrator rights) and adds a Start menu entry and an uninstaller. The build is not code-signed: if SmartScreen warns, choose **More info**, then **Run anyway**.
-            - **Windows x64 portable:** `auralis-${{ needs.meta.outputs.asset_label }}-windows-x86_64.zip`. Unzip anywhere and run `auralis.exe`.
-            - **macOS 13+ (Apple Silicon and Intel):** `auralis-${{ needs.meta.outputs.asset_label }}-macos-universal.dmg`. Open it and drag **Auralis** into **Applications**. The app is not notarized: on first launch, Control-click it in Applications, choose **Open**, then **Open** again (or allow it in System Settings, Privacy & Security).
-            - Each file has a matching `.sha256` checksum.
+            | Platform | File | Notes |
+            | --- | --- | --- |
+            | **Windows 10/11** (x64) | `auralis-${{ needs.meta.outputs.asset_label }}-windows-x86_64-setup.exe` | Recommended. Per-user install, no admin rights, uninstall from Settings › Apps. |
+            | Windows portable | `auralis-${{ needs.meta.outputs.asset_label }}-windows-x86_64.zip` | Unzip anywhere and run `auralis.exe`. |
+            | **macOS 13+** (Apple Silicon and Intel) | `auralis-${{ needs.meta.outputs.asset_label }}-macos-universal.dmg` | Open, drag **Auralis** into **Applications**. |
 
-            This is a test build, not a reviewed release. See `CHANGELOG.md` for changes and known limitations.
+            ## First launch
+
+            These builds are not code-signed yet, so the OS asks once:
+
+            - **Windows:** if SmartScreen says "Windows protected your PC", choose **More info**, then **Run anyway**.
+            - **macOS:** Control-click Auralis in Applications, choose **Open**, then **Open** again. Or allow it in System Settings › Privacy & Security.
+
+            ## Verify the download
+
+            Each file has a `.sha256` next to it.
+
+            ```
+            # Windows (PowerShell)
+            Get-FileHash .\<file> -Algorithm SHA256
+            # macOS
+            shasum -a 256 <file>
+            ```
+
+            ## Status
+
+            Formatting, Clippy, tests, and release builds passed on native Windows and macOS runners. That covers compilation and automated tests; wallpaper layering and playback are tested by hand (see [`docs/PLATFORM_TEST_MATRIX.md`](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/docs/PLATFORM_TEST_MATRIX.md)). Full changes and known limitations: [`CHANGELOG.md`](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/CHANGELOG.md).
+
+            This is a test build, not a stable release.

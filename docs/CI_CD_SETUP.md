@@ -9,9 +9,9 @@ The repository has four workflows:
 
 ## Numbered builds from main
 
-Each push to `main` builds the app and publishes a GitHub **prerelease** named `Auralis <version> (build <N>)` with the tag `v<version>+build.<N>`, for example `v0.2.0-beta.1+build.42`. `<N>` is the workflow run number, so it increases with every build. `<version>` is read from `Cargo.toml`; `+build.<N>` is SemVer build metadata, so the package version is not bumped for each build. The build number is stamped into the binary through `AURALIS_BUILD_NUMBER`: the Studio title, tray tooltip, and `auralis status` show `0.2.0-beta.1+build.42`, and the macOS bundle uses it as `CFBundleVersion`. Asset names use `-build.<N>` (no `+`), for example `auralis-v0.2.0-beta.1-build.42-windows-x86_64.zip`.
+Each push to `main` builds the app and publishes a GitHub **prerelease** named `Auralis <version> · Build <N>` with the tag `v<version>-build.<N>`, for example `v0.2.0-beta.1-build.42` (no `+`, which GitHub would show as `%2B` in the release URL). `<N>` is the workflow run number, so it increases with every build. `<version>` is read from `Cargo.toml`, so the package version is not bumped for each build. The build number is stamped into the binary through `AURALIS_BUILD_NUMBER`: the Studio title, tray tooltip, and `auralis status` show `0.2.0-beta.1+build.42`, and the macOS bundle uses it as `CFBundleVersion`. Asset names match the tag, for example `auralis-v0.2.0-beta.1-build.42-windows-x86_64.zip`.
 
-The workflow refuses to publish from any branch other than the default branch, never marks a build as the latest release, and only the final publish job has `contents: write`. Builds can also be started manually from the Actions tab (`workflow_dispatch`) on `main`. These are unsigned test builds; `release.yml` ignores `+build` tags so they never become draft releases.
+The workflow refuses to publish from any branch other than the default branch, never marks a build as the latest release, and only the final publish job has `contents: write`. Builds can also be started manually from the Actions tab (`workflow_dispatch`) on `main`. These are unsigned test builds; `release.yml` ignores `-build.<N>` tags so they never become draft releases.
 
 ## Pull request and main-branch checks
 
