@@ -90,7 +90,7 @@ jobs:
 
             ### Platform Support Status
             - **Windows (`auralis-${{ github.ref_name }}-windows-x86_64.zip`)**: Native `WorkerW` desktop layering, Media Foundation (`mfplay.dll`) video playback, and the Win32 Configuration Studio UI.
-            - **macOS (`auralis-${{ github.ref_name }}-macos-<arch>.app.zip`)**: Menu-bar app using AVFoundation video playback and a native desktop host. The artifact is single-architecture, unsigned, and not notarized. Desktop layering and media playback require manual acceptance testing.
+            - **macOS 13+ (`auralis-${{ github.ref_name }}-macos-universal.dmg`)**: Menu-bar app using AVFoundation video playback and a native desktop host, as one universal (Apple Silicon and Intel) app. Drag it into Applications. It is ad-hoc signed only and not notarized, so the first launch needs Control-click, then Open. Desktop layering and media playback require manual acceptance testing.
             - The Windows Configuration Studio and in-app preview are not available on macOS.
 
             *(See `CHANGELOG.md` for full details and known limitations.)*

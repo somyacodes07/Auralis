@@ -104,3 +104,12 @@ jobs:
 
       - name: Release Build
         run: cargo build --workspace --release --all-features --locked
+
+  package:
+    name: Package Installers
+    # Proves the Windows zip and macOS DMG still build before merge. Artifacts are attached to
+    # the workflow run only; nothing is published. Pushes to main package in build-release.yml.
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/package.yml
+    with:
+      asset_label: pr-${{ github.event.pull_request.number }}

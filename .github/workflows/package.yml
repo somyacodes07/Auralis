@@ -72,12 +72,14 @@ jobs:
           if-no-files-found: error
 
   build-macos:
-    name: Build macOS App Bundle
+    name: Build macOS Universal DMG
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     env:
       AURALIS_BUILD_NUMBER: ${{ inputs.build_number }}
       ASSET_LABEL: ${{ inputs.asset_label }}
+      # Oldest macOS the universal build supports; also passed to the Objective-C bridge.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -89,6 +91,7 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -99,18 +102,27 @@ jobs:
       - name: Run Tests
         run: cargo test --workspace --all-features --locked
 
-      - name: Build Release Binary
-        run: cargo build --workspace --release --all-features --locked
-
-      - name: Package macOS Artifact
+      - name: Build Apple Silicon and Intel Binaries
         run: |
-          ARCH="$(uname -m)"
-          ASSET_NAME="auralis-${ASSET_LABEL}-macos-${ARCH}"
+          cargo build --workspace --release --all-features --locked --target aarch64-apple-darwin
+          cargo build --workspace --release --all-features --locked --target x86_64-apple-darwin
+
+      - name: Package Universal DMG
+        run: |
           VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")
           BUNDLE_BUILD="${AURALIS_BUILD_NUMBER:-0}"
-          APP_ROOT="dist/Auralis.app"
+          ASSET_NAME="auralis-${ASSET_LABEL}-macos-universal"
+          STAGE="dist/stage"
+          APP_ROOT="${STAGE}/Auralis.app"
           mkdir -p "${APP_ROOT}/Contents/MacOS" dist
-          cp target/release/auralis "${APP_ROOT}/Contents/MacOS/Auralis"
+
+          # One binary with arm64 and x86_64 slices.
+          lipo -create \
+            target/aarch64-apple-darwin/release/auralis \
+            target/x86_64-apple-darwin/release/auralis \
+            -output "${APP_ROOT}/Contents/MacOS/Auralis"
+          lipo "${APP_ROOT}/Contents/MacOS/Auralis" -verify_arch arm64 x86_64
+
           cat > "${APP_ROOT}/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -120,6 +132,8 @@ jobs:
               <string>com.auralis.wallpaper</string>
               <key>CFBundleName</key>
               <string>Auralis</string>
+              <key>CFBundleDisplayName</key>
+              <string>Auralis</string>
               <key>CFBundleExecutable</key>
               <string>Auralis</string>
               <key>CFBundlePackageType</key>
@@ -128,6 +142,8 @@ jobs:
               <string>${VERSION%%-*}</string>
               <key>CFBundleVersion</key>
               <string>${BUNDLE_BUILD}</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>${MACOSX_DEPLOYMENT_TARGET}</string>
               <key>NSPrincipalClass</key>
               <string>NSApplication</string>
               <key>LSUIElement</key>
@@ -138,12 +154,20 @@ jobs:
           </plist>
           PLIST
           plutil -lint "${APP_ROOT}/Contents/Info.plist"
-          ditto -c -k --sequesterRsrc --keepParent "${APP_ROOT}" "dist/${ASSET_NAME}.app.zip"
-          cp target/release/auralis "dist/${ASSET_NAME}"
-          tar -C dist -czf "dist/${ASSET_NAME}.tar.gz" "${ASSET_NAME}"
-          (cd dist && shasum -a 256 "${ASSET_NAME}.app.zip" > "${ASSET_NAME}.app.zip.sha256")
-          (cd dist && shasum -a 256 "${ASSET_NAME}.tar.gz" > "${ASSET_NAME}.tar.gz.sha256")
-          rm -rf "${APP_ROOT}" "dist/${ASSET_NAME}"
+
+          # Ad-hoc signature only (no Apple Developer ID). This keeps the bundle's code
+          # signature consistent on Apple Silicon; Gatekeeper still treats it as unidentified.
+          codesign --force --sign - --timestamp=none "${APP_ROOT}"
+          codesign --verify --strict "${APP_ROOT}"
+
+          # Drag-to-install disk image: Auralis.app next to an Applications shortcut.
+          ln -s /Applications "${STAGE}/Applications"
+          hdiutil create -volname "Auralis" -srcfolder "${STAGE}" -fs HFS+ -format UDZO -ov \
+            "dist/${ASSET_NAME}.dmg"
+          hdiutil verify "dist/${ASSET_NAME}.dmg"
+          (cd dist && shasum -a 256 "${ASSET_NAME}.dmg" > "${ASSET_NAME}.dmg.sha256")
+          rm -rf "${STAGE}"
+          ls -la dist
 
       - name: Upload macOS Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

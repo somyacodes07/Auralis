@@ -17,6 +17,8 @@ The workflow refuses to publish from any branch other than the default branch, n
 
 The CI workflow uses least-privilege `contents: read` permissions and cancels older runs for the same ref. Formatting and patch hygiene run once; Windows and macOS each run Clippy, the workspace tests, and a release build on native hosted runners. Cargo is locked during native checks, and all declared crate features are checked. The patch-hygiene job checks the actual PR or push range instead of the clean checkout diff.
 
+Pull requests also run `package.yml` (the **Package Installers** check), so the Windows zip and universal macOS DMG are built and attached to the workflow run before merge. Nothing is published from a pull request.
+
 GitHub Actions are pinned to full commit SHAs. Dependabot checks the GitHub Actions ecosystem weekly and can propose reviewed pin updates.
 
 These checks prove compilation and automated tests on the runners. They do not prove Windows `WorkerW` or macOS desktop layering, visible video playback, or any other behavior that requires an interactive desktop acceptance test. The macOS job compiles the Objective-C AppKit/AVFoundation bridge through `build.rs` and links the native frameworks.
@@ -33,7 +35,7 @@ git tag -a v0.2.0-beta.1 -m "Auralis v0.2.0-beta.1"
 git push origin v0.2.0-beta.1
 ```
 
-The workflow checks tag syntax, exact version alignment with `Cargo.toml`, and reachability from the repository's default branch. It then runs formatting, Clippy, tests, and release builds on Windows and macOS. Windows packaging produces an x64 ZIP and checksum. macOS packaging produces a single-architecture `.app` bundle and CLI tarball with checksums. The app bundle is unsigned and not notarized. The final job has `contents: write` permission and creates a **draft**, which must be reviewed and published manually after platform acceptance testing.
+The workflow checks tag syntax, exact version alignment with `Cargo.toml`, and reachability from the repository's default branch. It then runs formatting, Clippy, tests, and release builds on Windows and macOS. Windows packaging produces an x64 ZIP and checksum. macOS packaging builds Apple Silicon and Intel binaries, merges them with `lipo` into one universal `Auralis.app` (minimum macOS 13), ad-hoc signs it, and wraps it in a drag-to-Applications `.dmg` with a checksum. The app is not notarized. The final job has `contents: write` permission and creates a **draft**, which must be reviewed and published manually after platform acceptance testing.
 
 The macOS menu-bar app uses AVFoundation to play local video in a native desktop host, but visual desktop layering, playback, display changes, and sleep/wake still require manual testing on a real Mac. Windows desktop behavior also requires testing with real media and the interactive desktop. See [the platform test matrix](PLATFORM_TEST_MATRIX.md).
 

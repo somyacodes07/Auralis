@@ -105,7 +105,7 @@ jobs:
 
             ### Downloads
             - **Windows x64:** `auralis-${{ needs.meta.outputs.asset_label }}-windows-x86_64.zip`. Unzip and run `auralis.exe`.
-            - **macOS:** `auralis-${{ needs.meta.outputs.asset_label }}-macos-<arch>.app.zip` (menu-bar app) and a CLI `.tar.gz`. Single-architecture, unsigned, and not notarized.
+            - **macOS 13+ (Apple Silicon and Intel):** `auralis-${{ needs.meta.outputs.asset_label }}-macos-universal.dmg`. Open it and drag **Auralis** into **Applications**. The app is not notarized: on first launch, Control-click it in Applications, choose **Open**, then **Open** again (or allow it in System Settings, Privacy & Security).
             - Each file has a matching `.sha256` checksum.
 
             This is a test build, not a reviewed release. See `CHANGELOG.md` for changes and known limitations.
