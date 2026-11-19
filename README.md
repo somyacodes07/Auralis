@@ -7,6 +7,8 @@
 
 A Rust-first live wallpaper application for **Windows** and **macOS**, built around native video playback and a quiet monochrome desktop experience.
 
+**Download:** <https://somyacodes07.github.io/Auralis/> picks the right build for your system. The page's source is in [`site/`](site/).
+
 ## Features (`v0.2.0-beta.1`)
 
 - **Native Video Wallpapers**: Windows uses Media Foundation (`mfplay.dll` / `IMFPMediaPlayer`) and `Progman`/`WorkerW` desktop layering. macOS uses AVFoundation (`AVPlayer` / `AVPlayerLayer`) and an AppKit desktop host. The macOS native integration compiles in CI; desktop layering and playback still need interactive acceptance testing on supported Macs.
