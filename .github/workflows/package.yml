@@ -121,7 +121,7 @@ jobs:
             target/aarch64-apple-darwin/release/auralis \
             target/x86_64-apple-darwin/release/auralis \
             -output "${APP_ROOT}/Contents/MacOS/Auralis"
-          lipo -verify_arch "${APP_ROOT}/Contents/MacOS/Auralis" arm64 x86_64
+          lipo "${APP_ROOT}/Contents/MacOS/Auralis" -verify_arch arm64 x86_64
 
           cat > "${APP_ROOT}/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
