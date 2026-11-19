@@ -121,6 +121,23 @@ impl DisplayWallpaperConfig {
     }
 }
 
+/// A display's desktop picture as macOS reports it, saved so Auralis can restore it exactly after
+/// "Match lock screen to wallpaper" replaced it with a still frame.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopPicture {
+    /// Absolute file URL string (`NSURL.absoluteString`), or a plain file path for Auralis stills.
+    pub url: String,
+    /// `NSWorkspaceDesktopImageScalingKey` (`NSImageScaling`), if it was set.
+    #[serde(default)]
+    pub scaling: Option<i32>,
+    /// `NSWorkspaceDesktopImageAllowClippingKey`, if it was set.
+    #[serde(default)]
+    pub allow_clipping: Option<bool>,
+    /// `NSWorkspaceDesktopImageFillColorKey` as sRGB components scaled to `0..=65535`, if set.
+    #[serde(default)]
+    pub fill_rgba: Option<[u16; 4]>,
+}
+
 /// Root application configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -143,6 +160,14 @@ pub struct AppConfig {
     /// Suppress nonessential interface animation for accessibility.
     #[serde(default)]
     pub reduce_motion: bool,
+    /// macOS: set a still frame of the wallpaper video as the desktop picture so the lock screen
+    /// and Mission Control match it. Opt-in; macOS does not allow video on the lock screen.
+    #[serde(default)]
+    pub match_lock_screen: bool,
+    /// macOS: original desktop pictures by display id, recorded before the first still frame
+    /// replaced them and removed once restored.
+    #[serde(default)]
+    pub lock_screen_originals: HashMap<String, DesktopPicture>,
 }
 
 impl Default for AppConfig {
@@ -156,6 +181,8 @@ impl Default for AppConfig {
             pause_on_battery: true,
             launch_at_startup: false,
             reduce_motion: false,
+            match_lock_screen: false,
+            lock_screen_originals: HashMap::new(),
         }
     }
 }
@@ -430,6 +457,8 @@ mod tests {
         assert!(loaded.per_display.contains_key("DISPLAY1"));
         assert!(!loaded.per_display.contains_key("DISPLAY_1"));
         assert!(!loaded.reduce_motion);
+        assert!(!loaded.match_lock_screen);
+        assert!(loaded.lock_screen_originals.is_empty());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

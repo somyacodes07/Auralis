@@ -6,19 +6,20 @@
 //! native AVFoundation wallpaper playback, the menu-bar app and Studio window, and login startup
 //! registration via `~/Library/LaunchAgents/com.auralis.wallpaper.plist`.
 
+use super::lock_screen::{DesktopPictureBackend, LockScreenSync, WallpaperTarget};
 use super::macos_studio::{
-    display_label, muted_after_volume_step, stepped_speed, stepped_volume, window_covers_display,
-    BehaviorSettings, ScreenRect, StudioAction, StudioSnapshot, StudioView,
+    cg_display_number, display_label, muted_after_volume_step, stepped_speed, stepped_volume,
+    window_covers_display, BehaviorSettings, ScreenRect, StudioAction, StudioSnapshot, StudioView,
 };
 use super::{
     DisplayInfo, PlatformAdapter, PlatformError, PowerStatus, ProcessResourceMetrics,
     VideoPlaybackTelemetry,
 };
-use crate::config::{validate_media_file, VideoAspectMode};
+use crate::config::{validate_media_file, DesktopPicture, VideoAspectMode};
 use crate::engine::WallpaperEngine;
 use crate::media::{MediaController, PlaybackState};
 use crate::{AppConfig, PlatformEvent};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::os::raw::c_char;
@@ -63,6 +64,7 @@ struct NativeStudioState {
     launch_at_login: u8,
     reduce_motion: u8,
     preview_active: u8,
+    match_lock_screen: u8,
 }
 
 type CGDirectDisplayID = u32;
@@ -131,6 +133,33 @@ extern "C" {
     fn auralis_macos_studio_start_preview(path: *const c_char, fit_aspect: u8) -> i32;
     fn auralis_macos_studio_stop_preview();
     fn auralis_macos_studio_preview_error(message: *mut c_char, capacity: usize) -> i32;
+    fn auralis_macos_desktop_picture_get(
+        display_id: u32,
+        url: *mut c_char,
+        url_capacity: usize,
+        scaling: *mut i32,
+        allow_clipping: *mut i32,
+        rgba: *mut u16,
+        has_color: *mut u8,
+        error: *mut c_char,
+        error_capacity: usize,
+    ) -> i32;
+    fn auralis_macos_desktop_picture_set(
+        display_id: u32,
+        url: *const c_char,
+        scaling: i32,
+        allow_clipping: i32,
+        rgba: *const u16,
+        error: *mut c_char,
+        error_capacity: usize,
+    ) -> i32;
+    fn auralis_macos_extract_still(
+        display_id: u32,
+        video_path: *const c_char,
+        output_path: *const c_char,
+        error: *mut c_char,
+        error_capacity: usize,
+    ) -> i32;
     fn auralis_macos_show_message(title: *const c_char, message: *const c_char);
     fn auralis_macos_host_create(display_id: u32) -> *mut std::ffi::c_void;
     fn auralis_macos_host_attach(handle: *mut std::ffi::c_void) -> i32;
@@ -822,6 +851,117 @@ fn poll_native_action() -> Option<(i32, i32, String)> {
     Some((action, value, text))
 }
 
+fn native_error(buffer: &[c_char]) -> String {
+    // SAFETY: Callers pass buffers the bridge NUL-terminated (it zeroes the first byte first).
+    let text = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    if text.is_empty() {
+        "macOS reported no details".to_string()
+    } else {
+        text
+    }
+}
+
+/// `NSWorkspace` desktop pictures and AVFoundation still frames for "Match lock screen to
+/// wallpaper". Main thread only.
+struct NativeDesktopPictures;
+
+impl NativeDesktopPictures {
+    fn screen(display_id: &str) -> Result<u32, String> {
+        cg_display_number(display_id).ok_or_else(|| format!("Unknown display {display_id}"))
+    }
+}
+
+impl DesktopPictureBackend for NativeDesktopPictures {
+    fn current(&mut self, display_id: &str) -> Result<DesktopPicture, String> {
+        let screen = Self::screen(display_id)?;
+        let mut url = vec![c_char::default(); 4096];
+        let mut error = [c_char::default(); 512];
+        let (mut scaling, mut clipping, mut has_color) = (-1i32, -1i32, 0u8);
+        let mut rgba = [0u16; 4];
+        // SAFETY: Every pointer refers to a live buffer of the stated capacity or one scalar.
+        let ok = unsafe {
+            auralis_macos_desktop_picture_get(
+                screen,
+                url.as_mut_ptr(),
+                url.len(),
+                &mut scaling,
+                &mut clipping,
+                rgba.as_mut_ptr(),
+                &mut has_color,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if ok == 0 {
+            return Err(native_error(&error));
+        }
+        // SAFETY: On success the bridge NUL-terminated `url`.
+        let url = unsafe { CStr::from_ptr(url.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        Ok(DesktopPicture {
+            url,
+            scaling: (scaling >= 0).then_some(scaling),
+            allow_clipping: (clipping >= 0).then_some(clipping != 0),
+            fill_rgba: (has_color != 0).then_some(rgba),
+        })
+    }
+
+    fn set(&mut self, display_id: &str, picture: &DesktopPicture) -> Result<(), String> {
+        let screen = Self::screen(display_id)?;
+        let url = CString::new(picture.url.as_bytes())
+            .map_err(|_| "The picture path contains a NUL byte".to_string())?;
+        let rgba = picture.fill_rgba;
+        let mut error = [c_char::default(); 512];
+        // SAFETY: `url` is NUL-terminated; `rgba` is null or points at four u16 values.
+        let ok = unsafe {
+            auralis_macos_desktop_picture_set(
+                screen,
+                url.as_ptr(),
+                picture.scaling.unwrap_or(-1),
+                picture.allow_clipping.map_or(-1, i32::from),
+                rgba.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if ok == 0 {
+            Err(native_error(&error))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn extract_still(
+        &mut self,
+        display_id: &str,
+        video: &Path,
+        output: &Path,
+    ) -> Result<(), String> {
+        let screen = Self::screen(display_id)?;
+        let video = c_path(video).ok_or_else(|| "The video path is not valid".to_string())?;
+        let output = c_path(output).ok_or_else(|| "The still path is not valid".to_string())?;
+        let mut error = [c_char::default(); 512];
+        // SAFETY: Both paths are NUL-terminated and alive for the call; `error` is writable.
+        let ok = unsafe {
+            auralis_macos_extract_still(
+                screen,
+                video.as_ptr(),
+                output.as_ptr(),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if ok == 0 {
+            Err(native_error(&error))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Rust-owned state of the macOS menu-bar app and Studio window. The Objective-C bridge only
 /// draws views and queues actions; every decision is made here.
 struct MacApp {
@@ -834,6 +974,10 @@ struct MacApp {
     pushed_view: Option<StudioView>,
     pushed_displays: Option<String>,
     pushed_reduce_motion: Option<bool>,
+    /// Displays the user paused, to tell a user pause from a battery or full-screen pause.
+    user_paused: HashSet<String>,
+    /// Still-frame desktop pictures for "Match lock screen to wallpaper".
+    lock_screen: LockScreenSync,
     quit: bool,
 }
 
@@ -844,6 +988,57 @@ impl MacApp {
             .get(self.selected_display)
             .map(|display| display.id.clone())
             .or_else(|| primary_display_id(&self.engine))
+    }
+
+    /// Displays with a loaded wallpaper, for lock screen matching.
+    fn wallpaper_targets(&self) -> Vec<WallpaperTarget> {
+        self.engine
+            .displays()
+            .iter()
+            .filter_map(|display| {
+                let controller = self.engine.controller(&display.id)?;
+                let video = match &controller.state {
+                    PlaybackState::Playing { path, .. }
+                    | PlaybackState::Paused { path, .. }
+                    | PlaybackState::Loading { path } => path.clone(),
+                    _ => return None,
+                };
+                Some(WallpaperTarget {
+                    display_id: display.id.clone(),
+                    video,
+                    aspect: controller.aspect_mode,
+                })
+            })
+            .collect()
+    }
+
+    /// Keep desktop pictures in step with the wallpapers (or restore them when the setting is
+    /// off). Native work happens only when a wallpaper or its scaling changes.
+    fn sync_lock_screen(&mut self, restore_everything: bool) {
+        let targets = self.wallpaper_targets();
+        let enabled = self.engine.config.match_lock_screen;
+        let report = if restore_everything {
+            self.lock_screen.restore_all(
+                &mut self.engine.config.lock_screen_originals,
+                &mut NativeDesktopPictures,
+            )
+        } else {
+            self.lock_screen.reconcile(
+                enabled,
+                &targets,
+                &mut self.engine.config.lock_screen_originals,
+                &mut NativeDesktopPictures,
+            )
+        };
+        for error in &report.errors {
+            eprintln!("Auralis lock screen: {error}");
+        }
+        if let Some(error) = report.errors.first() {
+            self.report("Lock screen", error);
+        }
+        if report.config_changed {
+            self.save_config();
+        }
     }
 
     /// Show an error in the Studio status line when it is open, otherwise as an alert.
@@ -945,11 +1140,13 @@ impl MacApp {
             metrics: metrics.as_ref(),
             preview: self.preview.as_deref(),
             last_error: self.last_error.as_deref(),
+            user_paused: self.user_paused.contains(&display_id),
             behavior: BehaviorSettings {
                 pause_on_fullscreen: self.engine.config.pause_on_fullscreen,
                 pause_on_battery: self.engine.config.pause_on_battery,
                 launch_at_login: self.engine.config.launch_at_startup,
                 reduce_motion: self.engine.config.reduce_motion,
+                match_lock_screen: self.engine.config.match_lock_screen,
             },
         });
         if self.pushed_view.as_ref() == Some(&view) {
@@ -977,6 +1174,7 @@ impl MacApp {
             launch_at_login: u8::from(view.launch_at_login),
             reduce_motion: u8::from(view.reduce_motion),
             preview_active: u8::from(view.preview_active),
+            match_lock_screen: u8::from(view.match_lock_screen),
         };
         // SAFETY: Every string pointer refers to a CString alive until the end of this scope;
         // the bridge copies them into AppKit controls before returning.
@@ -1056,6 +1254,7 @@ impl MacApp {
     fn apply(&mut self, display_id: &str, path: PathBuf) {
         // One decoder at a time: release the preview before the wallpaper player loads.
         self.stop_preview();
+        self.user_paused.remove(display_id);
         match self.engine.apply_wallpaper(display_id, path) {
             Ok(()) => {
                 self.last_error = None;
@@ -1086,8 +1285,10 @@ impl MacApp {
                 _ => continue,
             };
             let result = if is_playing {
+                self.user_paused.insert(display_id.clone());
                 self.engine.pause_display(&display_id)
             } else {
+                self.user_paused.remove(&display_id);
                 self.engine.resume_display(&display_id)
             };
             if let Err(error) = result {
@@ -1116,6 +1317,7 @@ impl MacApp {
             return;
         };
         self.stop_preview();
+        self.user_paused.remove(&display_id);
         match self.engine.cycle_next_recent_wallpaper(&display_id) {
             Ok(path) => {
                 self.last_error = None;
@@ -1132,6 +1334,7 @@ impl MacApp {
         match action {
             StudioAction::TogglePause => self.toggle_pause(vec![display_id.to_string()]),
             StudioAction::Stop => {
+                self.user_paused.remove(display_id);
                 if let Err(error) = self.engine.stop_display(display_id) {
                     self.report("Could not stop wallpaper", &error.to_string());
                 } else {
@@ -1202,6 +1405,7 @@ impl MacApp {
             StudioAction::NextRecent => self.next_recent(self.selected_display_id()),
             StudioAction::StopAll => {
                 for display_id in self.all_display_ids() {
+                    self.user_paused.remove(&display_id);
                     if let Err(error) = self.engine.stop_display(&display_id) {
                         self.report("Could not stop wallpaper", &error.to_string());
                     }
@@ -1258,6 +1462,11 @@ impl MacApp {
                 self.engine.config.pause_on_battery = enabled;
                 self.save_config();
             }
+            StudioAction::SetMatchLockScreen(enabled) => {
+                self.engine.config.match_lock_screen = enabled;
+                self.save_config();
+                self.sync_lock_screen(false);
+            }
             StudioAction::SetReduceMotion(enabled) => {
                 self.engine.config.reduce_motion = enabled;
                 self.save_config();
@@ -1278,6 +1487,14 @@ impl MacApp {
     }
 }
 
+/// `~/Library/Application Support/Auralis/lock-screen/`, next to the configuration file.
+fn lock_screen_directory(config_path: &Path) -> PathBuf {
+    config_path.parent().map_or_else(
+        || PathBuf::from("lock-screen"),
+        |dir| dir.join("lock-screen"),
+    )
+}
+
 /// Run the native macOS menu-bar app, its Studio window, and the wallpaper event loop.
 ///
 /// The Studio opens from the menu bar ("Open Auralis Studio…", Cmd-,) and automatically on
@@ -1287,6 +1504,8 @@ pub fn run_macos_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> R
     const TICK: Duration = Duration::from_millis(50);
     // Studio status refresh period in ticks (500 ms).
     const STUDIO_REFRESH_TICKS: u32 = 10;
+    // Lock screen reconcile period in ticks (1 s).
+    const LOCK_SCREEN_SYNC_TICKS: u32 = 20;
 
     let config_path = AppConfig::default_config_path();
     let (config, load_warning) = AppConfig::load_or_recover(&config_path);
@@ -1296,7 +1515,7 @@ pub fn run_macos_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> R
 
     let mut app = MacApp {
         engine,
-        config_path,
+        config_path: config_path.clone(),
         studio_open: false,
         selected_display: 0,
         preview: None,
@@ -1304,6 +1523,8 @@ pub fn run_macos_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> R
         pushed_view: None,
         pushed_displays: None,
         pushed_reduce_motion: None,
+        user_paused: HashSet::new(),
+        lock_screen: LockScreenSync::new(lock_screen_directory(&config_path)),
         quit: false,
     };
     app.push_reduce_motion();
@@ -1349,9 +1570,13 @@ pub fn run_macos_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> R
             app.report("Wallpaper playback stopped", &error.to_string());
             changed = true;
         }
+        tick_counter = tick_counter.wrapping_add(1);
+        // Once a second (or right after an action) compare wallpapers with matched pictures.
+        if changed || tick_counter.is_multiple_of(LOCK_SCREEN_SYNC_TICKS) {
+            app.sync_lock_screen(false);
+        }
         if app.studio_open {
             app.poll_preview_failure();
-            tick_counter = tick_counter.wrapping_add(1);
             if changed || tick_counter.is_multiple_of(STUDIO_REFRESH_TICKS) {
                 app.push_studio_view();
             }
@@ -1360,6 +1585,9 @@ pub fn run_macos_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> R
     }
 
     app.stop_preview();
+    // Quit puts every original desktop picture back. A force-quit cannot; the originals stay
+    // recorded in the configuration and are restored on the next Quit or when turned off.
+    app.sync_lock_screen(true);
     // SAFETY: Closes the Studio, removes the status item and notifications on the main thread.
     unsafe { auralis_macos_end_menu() };
     app.engine
