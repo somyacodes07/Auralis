@@ -73,8 +73,15 @@ These scripts verify:
 
 Every merge to `main` is built on native Windows and macOS runners and published as a numbered **prerelease** on the [Releases page](https://github.com/somyacodes07/Auralis/releases), tagged like `v0.2.0-beta.1+build.42`. The build number is shown in the Studio title bar and in `auralis status`. These are unsigned test builds; see [docs/CI_CD_SETUP.md](docs/CI_CD_SETUP.md).
 
+### Install on macOS
 
-Pull requests to `main` run formatting and patch-hygiene checks plus native Windows and macOS Clippy, tests, and release builds. Releases are tag-driven via [`.github/workflows/release.yml`](.github/workflows/release.yml). The workflow checks SemVer, exact equality with `Cargo.toml`, and reachability from the default branch. It builds a Windows ZIP and a single-architecture macOS app bundle and CLI archive. The draft release remains unsigned and must be reviewed and manually published after native acceptance testing:
+1. Download `auralis-<version>-macos-universal.dmg` from the release (works on Apple Silicon and Intel Macs, macOS 13 or later).
+2. Open the DMG and drag **Auralis** onto **Applications**.
+3. The app is not notarized yet. The first time, Control-click **Auralis** in Applications, choose **Open**, then **Open** again. If macOS still blocks it, go to **System Settings, Privacy & Security** and choose **Open Anyway**.
+4. Auralis runs in the menu bar (no Dock icon). To remove it, quit it from the menu bar and move `Auralis.app` to the Trash.
+
+
+Pull requests to `main` run formatting and patch-hygiene checks plus native Windows and macOS Clippy, tests, and release builds. Releases are tag-driven via [`.github/workflows/release.yml`](.github/workflows/release.yml). The workflow checks SemVer, exact equality with `Cargo.toml`, and reachability from the default branch. It builds a Windows ZIP and a universal macOS DMG. The draft release remains unsigned and must be reviewed and manually published after native acceptance testing:
 
 1. Push the committed source to the default branch, then push its matching annotated SemVer tag (e.g., `v0.2.0-beta.1`):
    ```powershell
@@ -82,7 +89,7 @@ Pull requests to `main` run formatting and patch-hygiene checks plus native Wind
    git tag -a v0.2.0-beta.1 -m "Auralis v0.2.0-beta.1 Beta Release"
    git push origin v0.2.0-beta.1
    ```
-2. GitHub Actions creates a **draft** release with Windows and macOS artifacts plus SHA-256 checksums. The macOS `.app` is single-architecture, unsigned, and not notarized. Review and publish the draft manually only after platform acceptance testing.
+2. GitHub Actions creates a **draft** release with Windows and macOS artifacts plus SHA-256 checksums. The macOS DMG holds a universal, ad-hoc signed app that is not notarized. Review and publish the draft manually only after platform acceptance testing.
 
 ## License
 

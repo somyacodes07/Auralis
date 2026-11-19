@@ -22,9 +22,22 @@ fn main() {
     let object = out_dir.join("auralis_macos_native.o");
     let archive = out_dir.join("libauralis_macos_native.a");
 
+    // Compile the bridge for the Rust target (not the host) so universal builds can link
+    // separate arm64 and x86_64 slices.
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86_64") => "x86_64",
+        Ok(other) => panic!("unsupported macOS target architecture: {other}"),
+        Err(error) => panic!("Cargo did not set CARGO_CFG_TARGET_ARCH: {error}"),
+    };
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    let min_version = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "13.0".into());
+
     let mut clang = Command::new("xcrun");
     clang
-        .args(["clang", "-fobjc-arc", "-fmodules", "-c"])
+        .args(["clang", "-fobjc-arc", "-fmodules", "-arch", arch])
+        .arg(format!("-mmacosx-version-min={min_version}"))
+        .arg("-c")
         .arg("src/platform/macos_native.m")
         .arg("-o")
         .arg(&object);

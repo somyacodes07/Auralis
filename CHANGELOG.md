@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Added
+- macOS builds now ship as one universal (Apple Silicon and Intel) `.dmg` with drag-to-Applications install, replacing the single-architecture `.app.zip` and CLI `.tar.gz`. The app is ad-hoc signed and requires macOS 13 or later.
 - Every merge to `main` is now built on Windows and macOS and published as a numbered GitHub prerelease tagged `v<version>+build.<N>`. The build number appears in the Studio title, tray tooltip, `auralis status`, and the macOS bundle version.
 - Added a matching monochrome Auralis wordmark and square mark, plus an app-owned Windows icon for the Studio and system tray.
 - Added a macOS menu-bar app backed by AppKit and AVFoundation, including wallpaper selection, playback/audio controls, recent cycling, Launch at Login, display changes, and sleep/wake handling.
