@@ -3,8 +3,8 @@
 ; Per-user install that never asks for administrator rights. CI compiles it in
 ; .github/workflows/package.yml after the release build:
 ;
-;   ISCC.exe /DAppVersion=0.2.0-beta.1 /DBuildNumber=42 ^
-;            /DOutputBaseName=auralis-v0.2.0-beta.1-build.42-windows-x86_64-setup ^
+;   ISCC.exe /DAppVersion=1.0.0-rc.1 /DBuildNumber=42 ^
+;            /DOutputBaseName=auralis-v1.0.0-rc.1-build.42-windows-x86_64-setup ^
 ;            /Odist installer\auralis.iss
 ;
 ; Local builds can omit every define; they fall back to development values below.

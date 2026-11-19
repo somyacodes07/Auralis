@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn test_version_not_empty() {
         assert!(!VERSION.is_empty());
-        assert_eq!(VERSION, "0.2.0-beta.1");
+        assert_eq!(VERSION, "1.0.0-rc.1");
     }
 
     #[test]

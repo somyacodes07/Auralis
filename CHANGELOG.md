@@ -5,6 +5,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] - 2026-11-20
+
+First release candidate for Auralis 1.0. It is the same code that will ship as 1.0.0 unless acceptance testing finds problems.
+
 ### Added
 - Automatic updates on Windows and macOS. Once a day (and from **Check for Updates** in the tray or menu bar) Auralis looks for a newer build on GitHub Releases, verifies the download against its published SHA-256 checksum, installs it, and starts again. Windows runs the new installer silently (`/relaunch=` brings Auralis back); macOS swaps `Auralis.app` in place. Turn it off with **Update Automatically**. `auralis update [--check]` does the same from a terminal. The portable zip and development builds only report new versions.
 - A download website at <https://somyacodes07.github.io/Auralis/> (source in `site/`, deployed by `.github/workflows/pages.yml`). It detects Windows or macOS and links straight to the matching installer from the newest published build, lists every file with its size and SHA-256 checksum, and states what is and isn't verified on each platform.
@@ -16,7 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - The Windows Studio's Wallpaper card shows what the selected display is playing: file name (never the full path), video resolution, and state.
 - The Windows Studio can be used from the keyboard: Tab and Shift+Tab move through the controls in visual order, and Space or Enter activates the focused control.
 - Added an opt-in macOS setting, **Match lock screen to wallpaper**. It sets a still frame from the wallpaper video as the desktop picture, so the lock screen and Mission Control match it, and restores the original picture when turned off, when the wallpaper stops, or on Quit. macOS does not allow video on the lock screen. Windows lock screen matching is not available yet.
-- Added a macOS Studio window, opened from **Open Auralis Studio…** (Cmd-,) in the menu bar and on launch when no wallpaper is running. It mirrors the Windows Studio: display selection, Browse, drag and drop, Next recent, an on-demand preview, Set as wallpaper, pause/resume, stop, mute, loop, volume, speed, Fill/Fit, behavior settings, and live status. Closing it keeps the wallpaper running. Not yet tested on a real Mac.
+- Added a macOS Studio window, opened from **Open Auralis Studio…** (Cmd-,) in the menu bar and on launch when no wallpaper is running. It mirrors the Windows Studio: display selection, Browse, drag and drop, Next recent, an on-demand preview, Set as wallpaper, pause/resume, stop, mute, loop, volume, speed, Fill/Fit, behavior settings, and live status. Closing it keeps the wallpaper running.
 - macOS now pauses for full-screen apps (on-screen window list) and reads battery state through IOKit, and reports process memory, CPU time, and wallpaper resolution/position.
 - macOS builds now ship as one universal (Apple Silicon and Intel) `.dmg` with drag-to-Applications install, replacing the single-architecture `.app.zip` and CLI `.tar.gz`. The app is ad-hoc signed and requires macOS 13 or later.
 - Every merge to `main` is now built on Windows and macOS and published as a numbered GitHub prerelease tagged `v<version>-build.<N>`. The build number appears in the Studio title, tray tooltip, `auralis status`, and the macOS bundle version.
@@ -34,7 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Fixed the Studio sometimes showing blank cards when restored from the tray.
 - Fixed a black macOS desktop when a wallpaper was paused (for example by Pause on battery power or Low Power Mode) right after it was applied. The video now always shows its first frame, and the Studio says why playback is paused and how to change it.
 - Fixed the macOS Studio layout overflowing its right edge with a long video path. The path field now shows the file name, status lines wrap instead of truncating, the display menu no longer looks disabled with one display, and controls use a neutral graphite fill instead of the system accent color.
-- Fixed the macOS wallpaper never appearing after a video was selected: the AppKit host window was created but never ordered on screen. It is now shown when created, placed one level below the Finder desktop icons (above the system desktop picture), and positioned correctly on secondary displays. If macOS does not show it, Auralis now reports an error instead of failing silently. `auralis verify-desktop` on macOS prints the host window's level, frame, and visibility. Not yet retested on a real Mac.
+- Fixed the macOS wallpaper never appearing after a video was selected: the AppKit host window was created but never ordered on screen. It is now shown when created, placed one level below the Finder desktop icons (above the system desktop picture), and positioned correctly on secondary displays. If macOS does not show it, Auralis now reports an error instead of failing silently. `auralis verify-desktop` on macOS prints the host window's level, frame, and visibility.
 - Fixed the `&` in "Quit & restore desktop" rendering as an underline mnemonic and the header live label being clipped.
 - The Windows Studio now closes the stray console window Windows opens when `auralis.exe` is launched from Explorer, the Start menu, or the sign-in entry. Selecting text in that console could suspend log output and stall the Studio. CLI commands run from a terminal still print normally.
 
@@ -50,6 +54,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Kept the previous macOS video visible until AVFoundation reports the replacement item ready to play.
 - Propagated native playback tick failures into recoverable engine state and surfaced the error once instead of silently ignoring it.
 - Updated platform documentation and runtime capability reporting for the implemented macOS native host while leaving hardware-decoding claims disabled.
+
+### Known Limitations
+- Builds are not code-signed (Windows) or notarized (macOS). Windows SmartScreen and macOS Gatekeeper ask once on first launch; update checksums prove a download matches the GitHub release, not who built it.
+- macOS cannot show video on the lock screen. **Match lock screen to wallpaper** uses a still frame, changes the picture for the current Space only, and may bring back a dynamic or aerial wallpaper as its static image. Windows has no lock-screen matching yet.
+- Pause in full screen on Windows covers exclusive and borderless full-screen apps on the same monitor. On macOS it uses the on-screen window list and may also pause for borderless overlays that cover the display.
+- `.mkv` and `.webm` files depend on the codecs the operating system has; AVFoundation on macOS usually cannot play them. MP4, MOV, and M4V with H.264 or HEVC are the recommended formats.
+- Manual testing so far covers one Windows 11 PC and one Apple Silicon Mac (macOS 15). Multi-display layouts with mixed scaling, Intel Macs, and Windows 10 are untested; see `docs/PLATFORM_TEST_MATRIX.md`.
 
 ## [0.2.0-beta.1] - 2026-10-13
 
