@@ -123,7 +123,7 @@ mod windows_resources {
             .collect::<Vec<_>>()
             .join(", ");
         let license = env::var("CARGO_PKG_LICENSE").unwrap_or_default();
-        let copyright = format!("Copyright (c) {company}. Licensed under {license}.");
+        let copyright = format!("Copyright (c) 2026 {company}. Licensed under {license}.");
         let numeric_list = numeric.map(|part| part.to_string()).join(",");
         let icon = rc_escape(&icon.display().to_string());
         let company = rc_escape(&company);

@@ -221,6 +221,8 @@ jobs:
           # App icon from the committed iconset (scripts/generate_brand_assets.py).
           iconutil -c icns assets/macos/AppIcon.iconset -o "${APP_ROOT}/Contents/Resources/Auralis.icns"
           test -s "${APP_ROOT}/Contents/Resources/Auralis.icns"
+          # License texts travel inside the app, like the Windows installer and zip.
+          cp LICENSE-MIT LICENSE-APACHE THIRD_PARTY_LICENSES.md "${APP_ROOT}/Contents/Resources/"
 
           # One binary with arm64 and x86_64 slices.
           lipo -create \
@@ -258,6 +260,8 @@ jobs:
               <true/>
               <key>NSHighResolutionCapable</key>
               <true/>
+              <key>NSHumanReadableCopyright</key>
+              <string>Copyright (c) 2026 Somyajeet Singh. Licensed under MIT OR Apache-2.0.</string>
           </dict>
           </plist>
           PLIST
@@ -300,6 +304,9 @@ jobs:
           test -f "${MOUNT_DIR}/.VolumeIcon.icns"
           test -f "${MOUNT_DIR}/.background/dmg-background.tiff"
           test -f "${MOUNT_DIR}/Auralis.app/Contents/Resources/Auralis.icns"
+          for file in LICENSE-MIT LICENSE-APACHE THIRD_PARTY_LICENSES.md; do
+            test -f "${MOUNT_DIR}/Auralis.app/Contents/Resources/${file}"
+          done
           test -L "${MOUNT_DIR}/Applications"
           hdiutil detach "${MOUNT_DIR}"
           (cd dist && shasum -a 256 "${ASSET_NAME}.dmg" > "${ASSET_NAME}.dmg.sha256")
