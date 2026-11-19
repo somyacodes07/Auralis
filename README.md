@@ -23,7 +23,7 @@
   <a href="#license"><img alt="License: MIT or Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-informational"></a>
 </p>
 
-> **Status: `1.0.0-rc.1`, release candidate.** Feature-complete for 1.0. It becomes `1.0.0` once acceptance testing on real Windows PCs and Macs passes. Please [report anything that breaks](https://github.com/somyacodes07/Auralis/issues).
+> **Status: `1.0.0`, stable.** Tested on a Windows 11 PC and an Apple Silicon Mac; see [Known limitations](#known-limitations). Please [report anything that breaks](https://github.com/somyacodes07/Auralis/issues).
 
 ---
 
@@ -162,7 +162,7 @@ If no resource compiler is found, a Windows build still succeeds with a warning 
 ## Releases and CI
 
 - Every pull request runs formatting, patch hygiene, `cargo deny`, and native Windows and macOS Clippy, tests, release builds, and packaging.
-- Every merge to `main` publishes a numbered **prerelease** such as `v1.0.0-rc.1-build.42`, with the Windows installer, the portable zip, the macOS DMG, and checksums.
+- Every merge to `main` publishes a numbered **prerelease** such as `v1.0.0-build.42`, with the Windows installer, the portable zip, the macOS DMG, and checksums.
 - Maintainer releases come from a plain `v<version>` tag that matches `Cargo.toml`. That builds a **draft** release, which is published by hand after acceptance testing.
 
 Details are in [docs/CI_CD_SETUP.md](docs/CI_CD_SETUP.md).
