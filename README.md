@@ -104,7 +104,7 @@ Memory and CPU use depend on the video's resolution, codec, and frame rate. See 
 
 - **Unsigned builds.** Windows SmartScreen and macOS Gatekeeper ask once on first launch. Update checksums prove a file matches its GitHub release, not who built it.
 - **Lock screen.** macOS does not allow video on the lock screen, so Auralis uses a still frame, for the current Space only. A dynamic or aerial wallpaper may come back as its static image. Windows has no lock-screen matching yet.
-- **Full-screen pause.** On Windows it covers exclusive and borderless full-screen apps on the same monitor. On macOS it uses the on-screen window list and may also pause for borderless overlays that cover the display.
+- **Full-screen pause.** On Windows it covers exclusive and borderless full-screen apps on the same monitor. On macOS it pauses for native full-screen Spaces and for any other app's window that covers the whole display, including borderless overlays.
 - **Testing coverage.** Manual testing so far covers one Windows 11 PC and one Apple Silicon Mac. Mixed-scale multi-monitor setups, Intel Macs, and Windows 10 are untested. Results are in [docs/PLATFORM_TEST_MATRIX.md](docs/PLATFORM_TEST_MATRIX.md).
 
 ## Troubleshooting

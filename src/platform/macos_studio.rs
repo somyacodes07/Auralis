@@ -166,8 +166,23 @@ fn decode_step(value: i32) -> Option<Step> {
 }
 
 fn decode_path(text: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    decode_path_with_home(text, home.as_deref())
+}
+
+/// Trim a typed or pasted path and expand a leading `~` to the home folder. The Studio shows
+/// paths in `~/…` form, so people type them that way too.
+fn decode_path_with_home(text: &str, home: Option<&Path>) -> Option<PathBuf> {
     let trimmed = text.trim();
-    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+    if trimmed.is_empty() {
+        return None;
+    }
+    let home = home.filter(|home| !home.as_os_str().is_empty());
+    Some(match (trimmed, home) {
+        ("~", Some(home)) => home.to_path_buf(),
+        (_, Some(home)) if trimmed.starts_with("~/") => home.join(&trimmed[2..]),
+        _ => PathBuf::from(trimmed),
+    })
 }
 
 impl StudioAction {
@@ -928,6 +943,33 @@ mod tests {
         );
         assert!(view.details.starts_with("To keep it playing, turn off"));
         assert_eq!(view.pause_label, "Resume wallpaper");
+    }
+
+    #[test]
+    fn typed_paths_expand_the_home_folder() {
+        let home = Path::new("/Users/tester");
+        assert_eq!(
+            decode_path_with_home(" ~/Downloads/a.mp4 ", Some(home)),
+            Some(PathBuf::from("/Users/tester/Downloads/a.mp4"))
+        );
+        assert_eq!(
+            decode_path_with_home("~", Some(home)),
+            Some(PathBuf::from("/Users/tester"))
+        );
+        // Only a leading `~/` expands; `~other` and paths without a home stay as typed.
+        assert_eq!(
+            decode_path_with_home("~other/a.mp4", Some(home)),
+            Some(PathBuf::from("~other/a.mp4"))
+        );
+        assert_eq!(
+            decode_path_with_home("/Movies/~/a.mp4", Some(home)),
+            Some(PathBuf::from("/Movies/~/a.mp4"))
+        );
+        assert_eq!(
+            decode_path_with_home("~/a.mp4", None),
+            Some(PathBuf::from("~/a.mp4"))
+        );
+        assert_eq!(decode_path_with_home("   ", Some(home)), None);
     }
 
     #[test]

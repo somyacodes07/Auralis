@@ -187,6 +187,7 @@ extern "C" {
         buffer: *mut c_char,
         capacity: usize,
     ) -> i32;
+    fn auralis_macos_host_on_active_space(handle: *mut std::ffi::c_void) -> i32;
     fn auralis_macos_host_detach(handle: *mut std::ffi::c_void) -> i32;
     fn auralis_macos_host_destroy(handle: *mut std::ffi::c_void) -> i32;
 }
@@ -197,6 +198,8 @@ pub struct MacOsPlatformAdapter {
     display_ids: Mutex<HashMap<String, CGDirectDisplayID>>,
     power_cache: Mutex<Option<(Instant, PowerStatus)>>,
     window_cache: Mutex<Option<(Instant, Vec<ScreenRect>)>>,
+    /// Live wallpaper hosts (opaque handle → display ID), for the full-screen Space check.
+    host_displays: Mutex<HashMap<isize, String>>,
 }
 
 impl MacOsPlatformAdapter {
@@ -252,6 +255,22 @@ impl MacOsPlatformAdapter {
                 _ => PowerStatus::Unknown,
             },
         }
+    }
+
+    /// Whether a native full-screen Space is showing on this display. The window list cannot
+    /// tell: on displays with a camera housing a full-screen window stops below the menu bar,
+    /// so it never covers the whole display. A visible host that is not on the active Space
+    /// can only be hidden by a full-screen Space, because it joins every ordinary Space.
+    fn display_shows_full_screen_space(&self, display_id: &str) -> bool {
+        let Ok(hosts) = self.host_displays.lock() else {
+            return false;
+        };
+        hosts.iter().any(|(&handle, id)| {
+            // SAFETY: Every handle in the map is a live host created by this adapter; it is
+            // removed before the host is destroyed.
+            id == display_id
+                && unsafe { auralis_macos_host_on_active_space(native_handle(handle)) } == 0
+        })
     }
 
     /// On-screen normal-layer windows of other apps, refreshed at most once per second.
@@ -424,9 +443,11 @@ impl PlatformAdapter for MacOsPlatformAdapter {
                 }
             },
         );
-        self.other_app_window_rects()
-            .into_iter()
-            .any(|window| window_covers_display(window, bounds))
+        self.display_shows_full_screen_space(&display.id)
+            || self
+                .other_app_window_rects()
+                .into_iter()
+                .any(|window| window_covers_display(window, bounds))
     }
 
     fn create_wallpaper_host_window(
@@ -460,6 +481,9 @@ impl PlatformAdapter for MacOsPlatformAdapter {
                 display.id
             )));
         }
+        if let Ok(mut hosts) = self.host_displays.lock() {
+            hosts.insert(handle as isize, display.id.clone());
+        }
         Ok(handle as isize)
     }
 
@@ -479,6 +503,9 @@ impl PlatformAdapter for MacOsPlatformAdapter {
     }
 
     fn destroy_wallpaper_host_window(&mut self, window_hwnd: isize) -> Result<(), PlatformError> {
+        if let Ok(mut hosts) = self.host_displays.lock() {
+            hosts.remove(&window_hwnd);
+        }
         // SAFETY: `window_hwnd` is an opaque host handle created by this adapter and is released once.
         if unsafe { auralis_macos_host_destroy(native_handle(window_hwnd)) } != 0 {
             Ok(())
