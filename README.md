@@ -77,7 +77,7 @@ These scripts verify:
 
 ## CI/CD and release artifacts
 
-Every merge to `main` is built on native Windows and macOS runners and published as a numbered **prerelease** on the [Releases page](https://github.com/somyacodes07/Auralis/releases), tagged like `v0.2.0-beta.1+build.42`. The build number is shown in the Studio title bar and in `auralis status`. These are unsigned test builds; see [docs/CI_CD_SETUP.md](docs/CI_CD_SETUP.md).
+Every merge to `main` is built on native Windows and macOS runners and published as a numbered **prerelease** on the [Releases page](https://github.com/somyacodes07/Auralis/releases), tagged like `v0.2.0-beta.1-build.42`. The build number is shown in the Studio title bar and in `auralis status`. These are unsigned test builds; see [docs/CI_CD_SETUP.md](docs/CI_CD_SETUP.md).
 
 ### Install on Windows
 
