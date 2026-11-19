@@ -906,6 +906,19 @@ int32_t auralis_macos_host_describe(void *handle, char *buffer, size_t capacity)
     }
 }
 
+// Returns 1 when the host window is on the active Space, 0 when it is not, -1 when unknown.
+// The host joins every ordinary Space but not full-screen Spaces, so 0 on a visible host means
+// a full-screen app owns this display and no part of the desktop can be seen.
+int32_t auralis_macos_host_on_active_space(void *handle) {
+    @autoreleasepool {
+        AuralisWallpaperHost *host = AuralisHost(handle);
+        if (host.window == nil || !host.window.isVisible) {
+            return -1;
+        }
+        return host.window.isOnActiveSpace ? 1 : 0;
+    }
+}
+
 const char *auralis_macos_host_last_error(void *handle) {
     AuralisWallpaperHost *host = AuralisHost(handle);
     return host == nil ? "AVFoundation playback failed" : host->lastError;

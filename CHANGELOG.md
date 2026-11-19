@@ -5,6 +5,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Fixed
+- macOS: **Pause while a full-screen app is open** now pauses for native full-screen apps on MacBooks with a camera housing. There a full-screen window stops below the menu bar, so it never covered the whole display and the wallpaper kept playing. Auralis now also pauses whenever its wallpaper window is not on the active Space, which only happens in a full-screen Space.
+- macOS: a path typed or pasted into the Studio's Video file field as `~/…` now expands to your home folder instead of failing with "Media file not found".
+
 ## [1.0.0-rc.1] - 2026-11-20
 
 First release candidate for Auralis 1.0. It is the same code that will ship as 1.0.0 unless acceptance testing finds problems.
