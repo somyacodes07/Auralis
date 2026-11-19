@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Added
+- Added a macOS Studio window, opened from **Open Auralis Studio…** (Cmd-,) in the menu bar and on launch when no wallpaper is running. It mirrors the Windows Studio: display selection, Browse, drag and drop, Next recent, an on-demand preview, Set as wallpaper, pause/resume, stop, mute, loop, volume, speed, Fill/Fit, behavior settings, and live status. Closing it keeps the wallpaper running. Not yet tested on a real Mac.
+- macOS now pauses for full-screen apps (on-screen window list) and reads battery state through IOKit, and reports process memory, CPU time, and wallpaper resolution/position.
 - macOS builds now ship as one universal (Apple Silicon and Intel) `.dmg` with drag-to-Applications install, replacing the single-architecture `.app.zip` and CLI `.tar.gz`. The app is ad-hoc signed and requires macOS 13 or later.
 - Every merge to `main` is now built on Windows and macOS and published as a numbered GitHub prerelease tagged `v<version>+build.<N>`. The build number appears in the Studio title, tray tooltip, `auralis status`, and the macOS bundle version.
 - Added a matching monochrome Auralis wordmark and square mark, plus an app-owned Windows icon for the Studio and system tray.
@@ -82,5 +84,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Known Limitations
 - macOS visual desktop layering, playback, display/sleep lifecycle, and startup behavior still need manual acceptance testing on an interactive Mac; CI compilation does not verify them.
-- macOS does not yet provide the Windows Studio window, embedded preview, process/GPU telemetry, or a universal/signed/notarized installer.
+- macOS does not report GPU memory and is not signed or notarized. The macOS Studio window has not been tested on a real Mac.
 - Windows native layering and playback also require manual acceptance on supported Windows configurations; CI compilation is not proof of visual desktop behavior.
