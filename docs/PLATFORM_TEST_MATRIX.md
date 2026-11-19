@@ -14,6 +14,7 @@ Record OS version, device model, display layout, video codec/profile/resolution/
 | Date | Platform | Build | Result | Notes |
 | --- | --- | --- | --- | --- |
 | 2026-11-19 | macOS 15 (Sequoia) or newer, Apple Silicon (exact version and model to be recorded) | `main` before the host-visibility fix (menu-bar app) | **FAIL** | User report: after selecting a video from the menu bar, the original desktop picture stays unchanged (no black window, no error). Cause found in code: the AppKit host window was created but never ordered on screen, and its level matched the system desktop picture. Fix pending user retest. |
+| 2026-11-19 | macOS 15 or newer, Apple Silicon, built-in display 1710 × 1112, on battery with Low Power Mode | PR #13 integration build (host-visibility fix and Studio) | **PARTIAL** | The wallpaper window is now visible, so the visibility fix works. The desktop stayed black: Pause on battery power paused the just-applied wallpaper before its first frame, and a paused replacement was never promoted. Studio layout overflowed the right edge and used the system accent color. Fixed in `feat/macos-studio`; pending user retest. |
 
 ## Current status
 

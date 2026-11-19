@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Added MIT and Apache-2.0 license texts, a dependency license inventory, contribution/security guidance, and a native platform acceptance matrix.
 
 ### Fixed
+- Fixed a black macOS desktop when a wallpaper was paused (for example by Pause on battery power or Low Power Mode) right after it was applied. The video now always shows its first frame, and the Studio says why playback is paused and how to change it.
+- Fixed the macOS Studio layout overflowing its right edge with a long video path. The path field now shows the file name, status lines wrap instead of truncating, the display menu no longer looks disabled with one display, and controls use a neutral graphite fill instead of the system accent color.
 - Fixed the macOS wallpaper never appearing after a video was selected: the AppKit host window was created but never ordered on screen. It is now shown when created, placed one level below the Finder desktop icons (above the system desktop picture), and positioned correctly on secondary displays. If macOS does not show it, Auralis now reports an error instead of failing silently. `auralis verify-desktop` on macOS prints the host window's level, frame, and visibility. Not yet retested on a real Mac.
 - Fixed the `&` in "Quit & restore desktop" rendering as an underline mnemonic and the header live label being clipped.
 - The Windows Studio now closes the stray console window Windows opens when `auralis.exe` is launched from Explorer, the Start menu, or the sign-in entry. Selecting text in that console could suspend log output and stall the Studio. CLI commands run from a terminal still print normally.

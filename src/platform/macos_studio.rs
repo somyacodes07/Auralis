@@ -245,15 +245,75 @@ fn file_name_or_default(path: &Path) -> String {
     )
 }
 
+/// Why a wallpaper is paused, so the Studio can say so instead of looking broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseReason {
+    /// The user paused it.
+    User,
+    /// "Pause on battery power" and the Mac is on battery.
+    Battery,
+    /// "Pause on battery power" and Low Power Mode is on.
+    LowPowerMode,
+    /// "Pause while a full-screen app is open" and one covers the display.
+    FullScreen,
+}
+
+/// Infer the pause reason from the same inputs `WallpaperEngine::evaluate_policy` uses. Returns
+/// `None` when the state is not paused or no reason applies (for example during sleep).
+#[must_use]
+pub fn pause_reason(
+    state: Option<&PlaybackState>,
+    user_paused: bool,
+    behavior: BehaviorSettings,
+    power: Option<&PowerStatus>,
+) -> Option<PauseReason> {
+    if !matches!(state, Some(PlaybackState::Paused { .. })) {
+        return None;
+    }
+    if user_paused {
+        return Some(PauseReason::User);
+    }
+    if behavior.pause_on_battery {
+        if let Some(PowerStatus::OnBattery { battery_saver, .. }) = power {
+            return Some(if *battery_saver {
+                PauseReason::LowPowerMode
+            } else {
+                PauseReason::Battery
+            });
+        }
+    }
+    behavior
+        .pause_on_fullscreen
+        .then_some(PauseReason::FullScreen)
+}
+
+/// Hint shown when a policy, not the user, paused the wallpaper.
+#[must_use]
+pub const fn pause_hint(reason: Option<PauseReason>) -> Option<&'static str> {
+    match reason {
+        Some(PauseReason::Battery | PauseReason::LowPowerMode) => {
+            Some("To keep it playing, turn off \u{201c}Pause on battery power\u{201d} below.")
+        }
+        Some(PauseReason::FullScreen) => Some("It resumes when the full-screen app closes."),
+        Some(PauseReason::User) | None => None,
+    }
+}
+
 /// One-line playback caption. Shows the file name only, never the full path.
 #[must_use]
-pub fn playback_caption(state: Option<&PlaybackState>) -> String {
+pub fn playback_caption(state: Option<&PlaybackState>, reason: Option<PauseReason>) -> String {
     match state {
         Some(PlaybackState::Playing { path, .. }) => {
             format!("Playing \u{b7} {}", file_name_or_default(path))
         }
         Some(PlaybackState::Paused { path, .. }) => {
-            format!("Paused \u{b7} {}", file_name_or_default(path))
+            let paused = match reason {
+                Some(PauseReason::Battery) => "Paused on battery power",
+                Some(PauseReason::LowPowerMode) => "Paused for Low Power Mode",
+                Some(PauseReason::FullScreen) => "Paused for a full-screen app",
+                Some(PauseReason::User) | None => "Paused",
+            };
+            format!("{paused} \u{b7} {}", file_name_or_default(path))
         }
         Some(PlaybackState::Loading { path }) => {
             format!("Loading \u{b7} {}", file_name_or_default(path))
@@ -331,7 +391,7 @@ pub fn power_caption(power: Option<&PowerStatus>) -> String {
         }) => {
             let level = percent.map_or_else(|| "Battery".to_string(), |p| format!("Battery {p}%"));
             if *battery_saver {
-                format!("{level} \u{b7} Low Power Mode")
+                format!("{level}, Low Power Mode")
             } else {
                 level
             }
@@ -349,7 +409,7 @@ pub fn metrics_caption(metrics: Option<&ProcessResourceMetrics>) -> String {
     };
     let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
     format!(
-        "Memory {:.1} MB footprint \u{b7} {:.1} MB resident \u{b7} CPU time {}s",
+        "Memory {:.1} MB ({:.1} MB resident) \u{b7} CPU {}s",
         mib(metrics.private_bytes),
         mib(metrics.working_set_bytes),
         metrics.cpu_time_ms / 1000
@@ -458,6 +518,8 @@ pub struct StudioSnapshot<'a> {
     pub preview: Option<&'a Path>,
     /// Most recent error, shown in place of the details line.
     pub last_error: Option<&'a str>,
+    /// Whether the user (not a policy) paused the selected display.
+    pub user_paused: bool,
     /// Saved behavior settings.
     pub behavior: BehaviorSettings,
 }
@@ -470,12 +532,21 @@ impl StudioView {
             || "Preview stopped".to_string(),
             |path| format!("Previewing {}", file_name_or_default(path)),
         );
+        let reason = pause_reason(
+            snapshot.state,
+            snapshot.user_paused,
+            snapshot.behavior,
+            snapshot.power,
+        );
         let details = snapshot.last_error.map_or_else(
-            || format!("{} \u{b7} {preview}", telemetry_caption(snapshot.telemetry)),
+            || {
+                let line = format!("{} \u{b7} {preview}", telemetry_caption(snapshot.telemetry));
+                pause_hint(reason).map_or(line.clone(), |hint| format!("{hint} {line}"))
+            },
             ToString::to_string,
         );
         Self {
-            status: playback_caption(snapshot.state),
+            status: playback_caption(snapshot.state, reason),
             details,
             resources: format!(
                 "{} \u{b7} {}",
@@ -618,15 +689,18 @@ mod tests {
     #[test]
     fn captions_show_file_name_but_never_the_full_path() {
         let state = playing("/Users/me/Private Folder/ocean.mp4");
-        let caption = playback_caption(Some(&state));
+        let caption = playback_caption(Some(&state), None);
         assert_eq!(caption, "Playing \u{b7} ocean.mp4");
         assert!(!caption.contains("Private Folder"));
-        assert_eq!(playback_caption(None), "No wallpaper running");
+        assert_eq!(playback_caption(None, None), "No wallpaper running");
         assert_eq!(
-            playback_caption(Some(&PlaybackState::Failed {
-                path: PathBuf::from("/x/broken.mov"),
-                error: "decoder".into(),
-            })),
+            playback_caption(
+                Some(&PlaybackState::Failed {
+                    path: PathBuf::from("/x/broken.mov"),
+                    error: "decoder".into(),
+                }),
+                None
+            ),
             "Could not play broken.mov"
         );
         assert_eq!(pause_button_label(Some(&state)), "Pause wallpaper");
@@ -662,7 +736,7 @@ mod tests {
                 percent: Some(64),
                 battery_saver: true,
             })),
-            "Battery 64% \u{b7} Low Power Mode"
+            "Battery 64%, Low Power Mode"
         );
         assert_eq!(
             power_caption(Some(&PowerStatus::OnAcPower)),
@@ -676,7 +750,7 @@ mod tests {
                 peak_working_set_bytes: 0,
                 cpu_time_ms: 4_500,
             })),
-            "Memory 50.0 MB footprint \u{b7} 100.0 MB resident \u{b7} CPU time 4s"
+            "Memory 50.0 MB (100.0 MB resident) \u{b7} CPU 4s"
         );
         let display = DisplayInfo {
             id: "CGDISPLAY1".into(),
@@ -709,6 +783,7 @@ mod tests {
             metrics: None,
             preview: Some(&preview),
             last_error: None,
+            user_paused: false,
             behavior: BehaviorSettings {
                 pause_on_fullscreen: true,
                 ..BehaviorSettings::default()
@@ -725,6 +800,87 @@ mod tests {
         let view = StudioView::build(&snapshot);
         assert_eq!(view.details, "Choose a video file first.");
         assert!(!view.preview_active);
+    }
+
+    #[test]
+    fn policy_pauses_explain_themselves() {
+        let paused = PlaybackState::Paused {
+            path: PathBuf::from("/m/cabin.3840x2160.mp4"),
+            position_secs: 0.0,
+        };
+        let behavior = BehaviorSettings {
+            pause_on_fullscreen: true,
+            pause_on_battery: true,
+            ..BehaviorSettings::default()
+        };
+        let low_power = PowerStatus::OnBattery {
+            percent: Some(92),
+            battery_saver: true,
+        };
+        let battery = PowerStatus::OnBattery {
+            percent: Some(92),
+            battery_saver: false,
+        };
+        assert_eq!(
+            pause_reason(Some(&paused), false, behavior, Some(&low_power)),
+            Some(PauseReason::LowPowerMode)
+        );
+        assert_eq!(
+            pause_reason(Some(&paused), false, behavior, Some(&battery)),
+            Some(PauseReason::Battery)
+        );
+        assert_eq!(
+            pause_reason(Some(&paused), true, behavior, Some(&battery)),
+            Some(PauseReason::User)
+        );
+        assert_eq!(
+            pause_reason(
+                Some(&paused),
+                false,
+                behavior,
+                Some(&PowerStatus::OnAcPower)
+            ),
+            Some(PauseReason::FullScreen)
+        );
+        let no_policies = BehaviorSettings::default();
+        assert_eq!(
+            pause_reason(Some(&paused), false, no_policies, Some(&battery)),
+            None
+        );
+        assert_eq!(
+            pause_reason(Some(&playing("/a.mp4")), false, behavior, Some(&battery)),
+            None
+        );
+        assert_eq!(
+            playback_caption(Some(&paused), Some(PauseReason::LowPowerMode)),
+            "Paused for Low Power Mode \u{b7} cabin.3840x2160.mp4"
+        );
+        assert_eq!(
+            playback_caption(Some(&paused), Some(PauseReason::User)),
+            "Paused \u{b7} cabin.3840x2160.mp4"
+        );
+
+        let view = StudioView::build(&StudioSnapshot {
+            state: Some(&paused),
+            muted: true,
+            volume: 0,
+            loop_playback: true,
+            speed_percent: 100,
+            aspect_mode: VideoAspectMode::Fill,
+            telemetry: None,
+            power: Some(&battery),
+            metrics: None,
+            preview: None,
+            last_error: None,
+            user_paused: false,
+            behavior,
+        });
+        assert_eq!(
+            view.status,
+            "Paused on battery power \u{b7} cabin.3840x2160.mp4"
+        );
+        assert!(view.details.starts_with("To keep it playing, turn off"));
+        assert_eq!(view.pause_label, "Resume wallpaper");
     }
 
     #[test]

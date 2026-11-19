@@ -18,7 +18,7 @@ use crate::config::{validate_media_file, VideoAspectMode};
 use crate::engine::WallpaperEngine;
 use crate::media::{MediaController, PlaybackState};
 use crate::{AppConfig, PlatformEvent};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::os::raw::c_char;
@@ -834,6 +834,8 @@ struct MacApp {
     pushed_view: Option<StudioView>,
     pushed_displays: Option<String>,
     pushed_reduce_motion: Option<bool>,
+    /// Displays the user paused, to tell a user pause from a battery or full-screen pause.
+    user_paused: HashSet<String>,
     quit: bool,
 }
 
@@ -945,6 +947,7 @@ impl MacApp {
             metrics: metrics.as_ref(),
             preview: self.preview.as_deref(),
             last_error: self.last_error.as_deref(),
+            user_paused: self.user_paused.contains(&display_id),
             behavior: BehaviorSettings {
                 pause_on_fullscreen: self.engine.config.pause_on_fullscreen,
                 pause_on_battery: self.engine.config.pause_on_battery,
@@ -1056,6 +1059,7 @@ impl MacApp {
     fn apply(&mut self, display_id: &str, path: PathBuf) {
         // One decoder at a time: release the preview before the wallpaper player loads.
         self.stop_preview();
+        self.user_paused.remove(display_id);
         match self.engine.apply_wallpaper(display_id, path) {
             Ok(()) => {
                 self.last_error = None;
@@ -1086,8 +1090,10 @@ impl MacApp {
                 _ => continue,
             };
             let result = if is_playing {
+                self.user_paused.insert(display_id.clone());
                 self.engine.pause_display(&display_id)
             } else {
+                self.user_paused.remove(&display_id);
                 self.engine.resume_display(&display_id)
             };
             if let Err(error) = result {
@@ -1116,6 +1122,7 @@ impl MacApp {
             return;
         };
         self.stop_preview();
+        self.user_paused.remove(&display_id);
         match self.engine.cycle_next_recent_wallpaper(&display_id) {
             Ok(path) => {
                 self.last_error = None;
@@ -1132,6 +1139,7 @@ impl MacApp {
         match action {
             StudioAction::TogglePause => self.toggle_pause(vec![display_id.to_string()]),
             StudioAction::Stop => {
+                self.user_paused.remove(display_id);
                 if let Err(error) = self.engine.stop_display(display_id) {
                     self.report("Could not stop wallpaper", &error.to_string());
                 } else {
@@ -1202,6 +1210,7 @@ impl MacApp {
             StudioAction::NextRecent => self.next_recent(self.selected_display_id()),
             StudioAction::StopAll => {
                 for display_id in self.all_display_ids() {
+                    self.user_paused.remove(&display_id);
                     if let Err(error) = self.engine.stop_display(&display_id) {
                         self.report("Could not stop wallpaper", &error.to_string());
                     }
@@ -1304,6 +1313,7 @@ pub fn run_macos_gui(initial_video: Option<PathBuf>, start_minimized: bool) -> R
         pushed_view: None,
         pushed_displays: None,
         pushed_reduce_motion: None,
+        user_paused: HashSet::new(),
         quit: false,
     };
     app.push_reduce_motion();

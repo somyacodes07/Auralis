@@ -93,10 +93,116 @@ static BOOL AuralisShouldReduceMotion(void) {
 @property(nonatomic, assign) CGDirectDisplayID displayID;
 @property(nonatomic, assign) float playbackRate;
 @property(nonatomic, assign) BOOL loopSeekPending;
+// Whether Rust wants this host playing; a policy or user pause clears it.
+@property(nonatomic, assign) BOOL wantsPlayback;
+// An exact seek was issued to render the first frame of a paused replacement.
+@property(nonatomic, assign) BOOL prerollSeekIssued;
+// When the pending item became ready to play (0 until then).
+@property(nonatomic, assign) CFAbsoluteTime pendingReadyAt;
+// A pending item failed while no tick ran (for example while paused); reported by the next tick.
+@property(nonatomic, assign) BOOL pendingFailed;
+// Drives promotion of the pending player on the main run loop, independent of play/pause.
+@property(nonatomic, strong) NSTimer *promotionTimer;
 @end
 
 @implementation AuralisWallpaperHost
 @end
+
+static void AuralisDiscardPending(AuralisWallpaperHost *host) {
+    [host.pendingPlayer pause];
+    [host.pendingPlayer replaceCurrentItemWithPlayerItem:nil];
+    [host.pendingLayer removeFromSuperlayer];
+    host.pendingPlayer = nil;
+    host.pendingLayer = nil;
+}
+
+// Swap a loaded replacement in once it can show a frame. Returns -1 when the replacement failed
+// (error recorded), 1 when it was promoted, and 0 while it is still loading.
+//
+// Promotion must not depend on playback: Rust only ticks playing displays, and a wallpaper that
+// a policy (battery, full screen) pauses straight after it is applied must still show its first
+// frame instead of a black window. A paused AVPlayer may never decode a frame on its own, so an
+// exact seek to the start is issued to render one.
+static int32_t AuralisPromotePending(AuralisWallpaperHost *host) {
+    AVPlayer *pending = host.pendingPlayer;
+    if (pending == nil) {
+        return 0;
+    }
+    AVPlayerItem *item = pending.currentItem;
+    if (item.status == AVPlayerItemStatusFailed) {
+        const char *description = item.error.localizedDescription.UTF8String;
+        snprintf(host->lastError, sizeof(host->lastError), "%s",
+                 description ?: "AVFoundation could not load this video");
+        AuralisDiscardPending(host);
+        return -1;
+    }
+    if (item.status != AVPlayerItemStatusReadyToPlay) {
+        return 0;
+    }
+    if (host.pendingReadyAt == 0) {
+        host.pendingReadyAt = CFAbsoluteTimeGetCurrent();
+    }
+    if (!host.pendingLayer.readyForDisplay) {
+        if (!host.wantsPlayback && !host.prerollSeekIssued) {
+            host.prerollSeekIssued = YES;
+            [pending seekToTime:kCMTimeZero toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+        }
+        // Keep the previous wallpaper visible until the first frame is ready, but never wait
+        // forever: after two seconds promote anyway, as before this check existed.
+        if (CFAbsoluteTimeGetCurrent() - host.pendingReadyAt < 2.0) {
+            return 0;
+        }
+    }
+    [host.player pause];
+    [host.player replaceCurrentItemWithPlayerItem:nil];
+    [host.playerLayer removeFromSuperlayer];
+    host.player = pending;
+    host.playerLayer = host.pendingLayer;
+    host.pendingPlayer = nil;
+    host.pendingLayer = nil;
+    // The new video fades in (Core Animation's implicit 0.25 s opacity animation). Reduce Motion
+    // (the Auralis setting or the macOS accessibility setting) makes the swap instant.
+    [CATransaction begin];
+    [CATransaction setDisableActions:AuralisShouldReduceMotion()];
+    host.playerLayer.opacity = 1.0;
+    [CATransaction commit];
+    host.loopSeekPending = NO;
+    if (host.wantsPlayback) {
+        [host.player playImmediatelyAtRate:host.playbackRate];
+    } else {
+        [host.player pause];
+    }
+    return 1;
+}
+
+static void AuralisStopPromotionTimer(AuralisWallpaperHost *host) {
+    [host.promotionTimer invalidate];
+    host.promotionTimer = nil;
+}
+
+static void AuralisStartPromotionTimer(AuralisWallpaperHost *host) {
+    AuralisStopPromotionTimer(host);
+    __weak AuralisWallpaperHost *weakHost = host;
+    NSTimer *timer = [NSTimer timerWithTimeInterval:0.05
+                                            repeats:YES
+                                              block:^(NSTimer *firing) {
+                                                  AuralisWallpaperHost *strongHost = weakHost;
+                                                  if (strongHost == nil || strongHost.pendingPlayer == nil) {
+                                                      [firing invalidate];
+                                                      return;
+                                                  }
+                                                  int32_t result = AuralisPromotePending(strongHost);
+                                                  if (result < 0) {
+                                                      strongHost.pendingFailed = YES;
+                                                  }
+                                                  if (result != 0) {
+                                                      AuralisStopPromotionTimer(strongHost);
+                                                  }
+                                              }];
+    // Common modes include the default mode that Rust's event pump runs.
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    host.promotionTimer = timer;
+}
 
 @interface AuralisMenuController : NSObject
 @property(nonatomic, strong) NSStatusItem *statusItem;
@@ -568,24 +674,29 @@ int32_t auralis_macos_host_start(void *handle,
         layer.opacity = 0.0;
         layer.videoGravity = fitAspect ? AVLayerVideoGravityResizeAspect : AVLayerVideoGravityResizeAspectFill;
         [host.window.contentView.layer addSublayer:layer];
-        [host.pendingPlayer pause];
-        [host.pendingLayer removeFromSuperlayer];
+        AuralisDiscardPending(host);
         host.pendingPlayer = player;
         host.pendingLayer = layer;
         host.loopSeekPending = NO;
+        host.wantsPlayback = YES;
+        host.prerollSeekIssued = NO;
+        host.pendingReadyAt = 0;
+        host.pendingFailed = NO;
         memset(host->lastError, 0, sizeof(host->lastError));
         [player playImmediatelyAtRate:host.playbackRate];
+        AuralisStartPromotionTimer(host);
         return 1;
     }
 }
 
 int32_t auralis_macos_host_pause(void *handle) {
     AuralisWallpaperHost *host = AuralisHost(handle);
-    AVPlayer *player = host.pendingPlayer ?: host.player;
-    if (player == nil) {
+    if (host.pendingPlayer == nil && host.player == nil) {
         return 0;
     }
-    [player pause];
+    host.wantsPlayback = NO;
+    [host.pendingPlayer pause];
+    [host.player pause];
     return 1;
 }
 
@@ -595,28 +706,26 @@ int32_t auralis_macos_host_resume(void *handle) {
     if (player == nil) {
         return 0;
     }
+    host.wantsPlayback = YES;
     [player playImmediatelyAtRate:host.playbackRate];
     return 1;
 }
 
 int32_t auralis_macos_host_stop(void *handle) {
     AuralisWallpaperHost *host = AuralisHost(handle);
-    if (host.player == nil) {
-        if (host.pendingPlayer == nil) {
-            return 1;
-        }
+    AuralisStopPromotionTimer(host);
+    if (host.player == nil && host.pendingPlayer == nil) {
+        return 1;
     }
     [host.player pause];
     [host.player replaceCurrentItemWithPlayerItem:nil];
     [host.playerLayer removeFromSuperlayer];
-    [host.pendingPlayer pause];
-    [host.pendingPlayer replaceCurrentItemWithPlayerItem:nil];
-    [host.pendingLayer removeFromSuperlayer];
+    AuralisDiscardPending(host);
     host.playerLayer = nil;
     host.player = nil;
-    host.pendingLayer = nil;
-    host.pendingPlayer = nil;
     host.loopSeekPending = NO;
+    host.wantsPlayback = NO;
+    host.pendingFailed = NO;
     return 1;
 }
 
@@ -657,30 +766,13 @@ int32_t auralis_macos_host_set_aspect(void *handle, uint8_t fitAspect) {
 
 int32_t auralis_macos_host_tick(void *handle, uint8_t loopPlayback) {
     AuralisWallpaperHost *host = AuralisHost(handle);
-    AVPlayerItem *pendingItem = host.pendingPlayer.currentItem;
-    if (pendingItem.status == AVPlayerItemStatusFailed) {
-        const char *description = pendingItem.error.localizedDescription.UTF8String;
-        snprintf(host->lastError, sizeof(host->lastError), "%s", description ?: "AVFoundation could not load this video");
-        [host.pendingPlayer pause];
-        [host.pendingLayer removeFromSuperlayer];
-        host.pendingPlayer = nil;
-        host.pendingLayer = nil;
+    if (host.pendingFailed) {
+        host.pendingFailed = NO;
         return -1;
     }
-    if (host.pendingPlayer != nil && pendingItem.status == AVPlayerItemStatusReadyToPlay) {
-        [host.player pause];
-        [host.playerLayer removeFromSuperlayer];
-        host.player = host.pendingPlayer;
-        host.playerLayer = host.pendingLayer;
-        host.pendingPlayer = nil;
-        host.pendingLayer = nil;
-        // The new video fades in (Core Animation's implicit 0.25 s opacity animation). Reduce Motion (Auralis setting or the macOS accessibility setting) makes
-        // the swap instant.
-        [CATransaction begin];
-        [CATransaction setDisableActions:AuralisShouldReduceMotion()];
-        host.playerLayer.opacity = 1.0;
-        [CATransaction commit];
-        host.loopSeekPending = NO;
+    if (AuralisPromotePending(host) < 0) {
+        AuralisStopPromotionTimer(host);
+        return -1;
     }
     AVPlayerItem *item = host.player.currentItem;
     if (item == nil) {
@@ -729,7 +821,7 @@ int32_t auralis_macos_host_describe(void *handle, char *buffer, size_t capacity)
         if (buffer == NULL || capacity == 0) {
             return 0;
         }
-        buffer[0] = ' ';
+        buffer[0] = '\0';
         if (host.window == nil) {
             snprintf(buffer, capacity, "%s", "no host window");
             return 0;
@@ -1028,6 +1120,7 @@ void auralis_macos_set_reduce_motion(uint8_t enabled) {
 @property(nonatomic, strong) AVPlayerLooper *previewLooper;
 @property(nonatomic, strong) AVPlayerLayer *previewLayer;
 - (void)stopPreviewPlayer;
+- (void)showPath:(NSString *)path;
 @end
 
 static const CGFloat AuralisGutter = 24.0;
@@ -1035,6 +1128,28 @@ static const CGFloat AuralisPreviewWidth = 512.0;
 
 static NSColor *AuralisGraphite(void) {
     return [NSColor colorWithCalibratedWhite:0.11 alpha:1.0];
+}
+
+// Neutral fill used instead of the system accent color (checked boxes, the selected segment and
+// the default button) so the Studio stays monochrome whatever accent the user chose. White text
+// on this gray keeps a contrast ratio above 4.5:1.
+static NSColor *AuralisNeutralAccent(void) {
+    return [NSColor colorWithCalibratedWhite:0.40 alpha:1.0];
+}
+
+// A secondary label that wraps to at most two lines within the content width.
+static NSTextField *AuralisWrappingLabel(NSString *text, BOOL semibold, BOOL secondary, CGFloat width) {
+    NSTextField *label = [NSTextField wrappingLabelWithString:text];
+    CGFloat size = secondary ? NSFont.smallSystemFontSize : NSFont.systemFontSize;
+    label.font = semibold ? [NSFont systemFontOfSize:size weight:NSFontWeightSemibold]
+                          : [NSFont systemFontOfSize:size];
+    label.textColor = secondary ? NSColor.secondaryLabelColor : NSColor.labelColor;
+    label.maximumNumberOfLines = 2;
+    label.lineBreakMode = NSLineBreakByWordWrapping;
+    label.cell.truncatesLastVisibleLine = YES;
+    label.preferredMaxLayoutWidth = width;
+    label.selectable = NO;
+    return label;
 }
 
 static NSTextField *AuralisLabel(NSString *text, BOOL semibold, BOOL secondary) {
@@ -1063,7 +1178,20 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
 }
 
 - (NSButton *)checkbox:(NSString *)title action:(SEL)action {
-    return [NSButton checkboxWithTitle:title target:self action:action];
+    NSButton *checkbox = [NSButton checkboxWithTitle:title target:self action:action];
+    checkbox.bezelColor = AuralisNeutralAccent();
+    return checkbox;
+}
+
+// Show a path in the field with its end (the file name) visible, as the Windows Studio does.
+- (void)showPath:(NSString *)path {
+    self.pathField.stringValue = path ?: @"";
+    NSText *editor = self.pathField.currentEditor;
+    if (editor != nil) {
+        NSRange end = NSMakeRange(editor.string.length, 0);
+        editor.selectedRange = end;
+        [editor scrollRangeToVisible:end];
+    }
 }
 
 - (NSButton *)stepButton:(NSString *)glyph accessibilityLabel:(NSString *)name action:(SEL)action {
@@ -1091,7 +1219,7 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
     __weak AuralisStudioController *weakSelf = self;
     content.onDropPath = ^(NSString *path) {
         // Dropping only fills the field; the preview starts when the user selects Preview.
-        weakSelf.pathField.stringValue = path;
+        [weakSelf showPath:path];
     };
     window.contentView = content;
 
@@ -1106,9 +1234,18 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
     self.pathField = [NSTextField textFieldWithString:@""];
     self.pathField.placeholderString = @"Choose or drop a video file";
     self.pathField.accessibilityLabel = @"Video file";
+    // A scrollable cell ignores the line break mode; without scrolling the field truncates at the
+    // head when not editing, so the file name stays visible.
+    self.pathField.cell.scrollable = NO;
+    self.pathField.cell.wraps = NO;
+    self.pathField.cell.usesSingleLineMode = YES;
     self.pathField.lineBreakMode = NSLineBreakByTruncatingHead;
     [self.pathField setContentHuggingPriority:NSLayoutPriorityDefaultLow
                                forOrientation:NSLayoutConstraintOrientationHorizontal];
+    // A long path must shrink the field, never widen the row past the window's right gutter.
+    [self.pathField setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                             forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.pathField.widthAnchor constraintGreaterThanOrEqualToConstant:120.0].active = YES;
     NSTextField *fileLabel = AuralisLabel(@"Video file", NO, YES);
     [fileLabel.widthAnchor constraintEqualToConstant:72.0].active = YES;
     NSButton *browse = [self button:@"Browse…" action:@selector(browse:)];
@@ -1137,6 +1274,7 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
     // Wallpaper actions
     NSButton *apply = [self button:@"Set as wallpaper" action:@selector(apply:)];
     apply.keyEquivalent = @"\r";
+    apply.bezelColor = AuralisNeutralAccent();
     self.pauseButton = [self button:@"Pause wallpaper" action:@selector(togglePause:)];
     self.stopButton = [self button:@"Stop wallpaper" action:@selector(stopWallpaper:)];
 
@@ -1149,6 +1287,7 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
                                                                 action:@selector(setScale:)];
     self.scaleControl.accessibilityLabel = @"Scale";
     self.scaleControl.selectedSegment = 0;
+    self.scaleControl.selectedSegmentBezelColor = AuralisNeutralAccent();
     NSTextField *scaleLabel = AuralisLabel(@"Scale", NO, YES);
     self.volumeLabel = AuralisLabel(@"Volume 0%", NO, NO);
     [self.volumeLabel.widthAnchor constraintGreaterThanOrEqualToConstant:88.0].active = YES;
@@ -1169,10 +1308,11 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
     self.motionCheckbox = [self checkbox:@"Reduce motion" action:@selector(setReduceMotion:)];
 
     // Status
-    self.statusLabel = AuralisLabel(@"No wallpaper running", YES, NO);
-    self.detailsLabel = AuralisLabel(@"", NO, YES);
-    self.resourcesLabel = AuralisLabel(@"", NO, YES);
-    NSTextField *closeHint = AuralisLabel(@"Closing this window keeps the wallpaper running.", NO, YES);
+    self.statusLabel = AuralisWrappingLabel(@"No wallpaper running", YES, NO, AuralisPreviewWidth);
+    self.detailsLabel = AuralisWrappingLabel(@"", NO, YES, AuralisPreviewWidth);
+    self.resourcesLabel = AuralisWrappingLabel(@"", NO, YES, AuralisPreviewWidth);
+    NSTextField *closeHint =
+        AuralisWrappingLabel(@"Closing this window keeps the wallpaper running.", NO, YES, AuralisPreviewWidth);
 
     NSArray<NSView *> *sections = @[
         AuralisLabel(@"Wallpaper", YES, NO),
@@ -1212,8 +1352,15 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
     [stack.trailingAnchor constraintEqualToAnchor:content.trailingAnchor].active = YES;
     [stack.topAnchor constraintEqualToAnchor:content.topAnchor].active = YES;
     [stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor].active = YES;
-    for (NSView *view in @[sections[2], self.statusLabel, self.detailsLabel, self.resourcesLabel]) {
+    // Fixed content width: 24 px gutter, 512 px column, 24 px gutter.
+    [content.widthAnchor constraintEqualToConstant:AuralisPreviewWidth + 2.0 * AuralisGutter].active = YES;
+    for (NSView *view in @[sections[2], self.statusLabel, self.detailsLabel, self.resourcesLabel, closeHint]) {
         [view.widthAnchor constraintEqualToConstant:AuralisPreviewWidth].active = YES;
+    }
+    // Reserve two lines for the wrapping status lines so updates never resize the window.
+    for (NSTextField *label in @[self.statusLabel, self.detailsLabel, self.resourcesLabel]) {
+        CGFloat lineHeight = ceil(label.font.ascender - label.font.descender + label.font.leading);
+        [label.heightAnchor constraintEqualToConstant:2.0 * lineHeight].active = YES;
     }
 
     // Size the window to its content so the 24 px gutters hold on every edge.
@@ -1248,7 +1395,7 @@ static NSStackView *AuralisRow(NSArray<NSView *> *views) {
     [panel beginSheetModalForWindow:self.window
                   completionHandler:^(NSModalResponse result) {
                       if (result == NSModalResponseOK && panel.URL != nil) {
-                          weakSelf.pathField.stringValue = panel.URL.path;
+                          [weakSelf showPath:panel.URL.path];
                       }
                   }];
 }
@@ -1408,13 +1555,13 @@ void auralis_macos_studio_set_displays(const char *labels, int32_t selected) {
         if (selected >= 0 && selected < (int32_t)studio.displayPopup.numberOfItems) {
             [studio.displayPopup selectItemAtIndex:selected];
         }
-        studio.displayPopup.enabled = titles.count > 1;
+        studio.displayPopup.enabled = titles.count > 0;
     }
 }
 
 void auralis_macos_studio_set_path(const char *path) {
     @autoreleasepool {
-        gAuralisStudio.pathField.stringValue = AuralisString(path);
+        [gAuralisStudio showPath:AuralisString(path)];
     }
 }
 
