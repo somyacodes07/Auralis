@@ -25,6 +25,10 @@
 
 > **Status: `1.0.0`, stable.** Tested on a Windows 11 PC and an Apple Silicon Mac; see [Known limitations](#known-limitations). Please [report anything that breaks](https://github.com/somyacodes07/Auralis/issues).
 
+<p align="center">
+  <img src="assets/public/demo-readme.gif" alt="Auralis Studio setting a 4K video as the Windows desktop wallpaper, then hiding to the tray while the wallpaper keeps playing behind the icons" width="640">
+</p>
+
 ---
 
 ## What it does
@@ -97,6 +101,10 @@ Auralis collects no telemetry and has no account. Its only network traffic is th
 | OS | Windows 10 (1803 or later) or Windows 11, x64 | macOS 13 Ventura or later |
 | Hardware | Any GPU with hardware video decoding recommended | Apple Silicon or Intel |
 | Rights | Standard user, no administrator needed | Standard user |
+
+<img src="assets/public/task-manager.png" alt="Windows Task Manager showing Auralis live wallpaper at 0% CPU and 18.1 MB memory" width="480">
+
+On the Windows 11 test PC, a 4K H.264 wallpaper shows 0% CPU and under 20 MB in Task Manager, because decoding runs on the GPU. The decoder's buffers are counted under **Commit size** in Task Manager's Details tab (about 340 MB for 4K), not in the Memory column. On a MacBook Air M4 the same kind of video used 2–4% CPU and a 54–57 MB memory footprint.
 
 Memory and CPU use depend on the video's resolution, codec, and frame rate. See [docs/UX_AND_PERFORMANCE.md](docs/UX_AND_PERFORMANCE.md) for how Auralis measures them; the Studio shows live numbers.
 

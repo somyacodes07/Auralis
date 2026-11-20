@@ -179,6 +179,11 @@ h1 {
 .seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
 
 /* Sections */
+.real { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; align-items: start; }
+.real figure { margin: 0; }
+.real video, .real img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.real figcaption { color: var(--muted); font-size: 15px; margin-top: 12px; }
+@media (max-width: 760px) { .real { grid-template-columns: 1fr; } }
 section { padding-block: 120px; }
 section + section { border-top: 1px solid var(--line); }
 h2 {
@@ -370,6 +375,23 @@ footer nav { display: flex; gap: 20px; }
       </span>
     </div>
   </div>
+
+  <section id="real">
+    <div class="wrap">
+      <h2>On a real desktop</h2>
+      <p class="intro">Recorded on Windows 11 with Auralis 1.0: choose a video, set it, and hide the Studio. The wallpaper keeps playing behind the icons.</p>
+      <div class="real">
+        <figure>
+          <video id="demo-video" src="media/demo.mp4" poster="media/demo-poster.jpg" width="1280" height="720" muted loop playsinline controls preload="metadata"></video>
+          <figcaption>Two 4K videos, switched from the Studio.</figcaption>
+        </figure>
+        <figure>
+          <img src="media/task-manager.png" width="909" height="512" alt="Windows Task Manager showing Auralis live wallpaper at 0% CPU and 18.1 MB memory while playing a 4K video" loading="lazy">
+          <figcaption>Playing a 4K video: 0% CPU and under 20 MB in Task Manager on the test PC. Decoding runs on the GPU; the decoder's buffers are counted under Commit size, not here.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
 
   <section id="features">
     <div class="wrap">
@@ -945,6 +967,16 @@ footer nav { display: flex; gap: 20px; }
       requestAnimationFrame(breathe);
     })(0);
   }
+})();
+</script>
+<script>
+(() => {
+  const video = document.getElementById('demo-video');
+  if (!video || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const play = () => video.play().catch(() => {});
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver(entries => entries.forEach(e => e.isIntersecting ? play() : video.pause())).observe(video);
+  } else { play(); }
 })();
 </script>
 </body>
