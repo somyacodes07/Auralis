@@ -23,6 +23,8 @@ ehthumbs.db
 # Local test media (never commit user media files)
 /media/
 *.mp4
+# The website demo is the one video tracked on purpose (free-licence wallpapers, ~3 MB).
+!site/media/demo.mp4
 *.mov
 *.mkv
 *.webm
